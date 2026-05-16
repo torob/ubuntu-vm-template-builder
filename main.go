@@ -29,6 +29,9 @@ import (
 const (
 	seedISOSizeBytes   int64 = 8 * 1024 * 1024
 	defaultDiskFmt           = "raw"
+	defaultBootMode          = "uefi"
+	bootModeUEFI             = "uefi"
+	bootModeBIOS             = "bios"
 	fallbackName             = "ubuntu-autoinstall"
 	qemuInterruptGrace       = 5 * time.Second
 )
@@ -40,17 +43,21 @@ type InstallConfig struct {
 	UserData     []byte
 	DiskSize     string
 	DiskFormat   string
+	BootMode     string
 	DisplayName  string
 }
 
 type Installer struct {
-	ubuntuISO string
-	imagePath string
-	userData  []byte
-	diskSize  string
-	diskFmt   string
-	display   string
-	tempDir   string
+	ubuntuISO            string
+	imagePath            string
+	userData             []byte
+	diskSize             string
+	diskFmt              string
+	bootMode             string
+	ovmfCodePath         string
+	ovmfVarsTemplatePath string
+	display              string
+	tempDir              string
 }
 
 type OSInfo struct {
@@ -75,6 +82,21 @@ type prerequisiteReport struct {
 	Items []prerequisiteItem
 }
 
+type ovmfFirmware struct {
+	CodePath string
+	VarsPath string
+}
+
+var ovmfFirmwareCandidates = []ovmfFirmware{
+	{CodePath: "/usr/share/OVMF/OVMF_CODE_4M.fd", VarsPath: "/usr/share/OVMF/OVMF_VARS_4M.fd"},
+	{CodePath: "/usr/share/OVMF/OVMF_CODE.fd", VarsPath: "/usr/share/OVMF/OVMF_VARS.fd"},
+	{CodePath: "/usr/share/edk2/ovmf/OVMF_CODE.fd", VarsPath: "/usr/share/edk2/ovmf/OVMF_VARS.fd"},
+	{CodePath: "/usr/share/edk2/ovmf/OVMF_CODE_4M.fd", VarsPath: "/usr/share/edk2/ovmf/OVMF_VARS_4M.fd"},
+	{CodePath: "/usr/share/edk2/x64/OVMF_CODE.fd", VarsPath: "/usr/share/edk2/x64/OVMF_VARS.fd"},
+	{CodePath: "/usr/share/edk2/x64/OVMF_CODE.4m.fd", VarsPath: "/usr/share/edk2/x64/OVMF_VARS.4m.fd"},
+	{CodePath: "/usr/share/qemu/ovmf-x86_64-code.bin", VarsPath: "/usr/share/qemu/ovmf-x86_64-vars.bin"},
+}
+
 func newInstaller(cfg InstallConfig) (*Installer, error) {
 	tmpDir, err := os.MkdirTemp("", "ubuntu-installer-")
 	if err != nil {
@@ -88,14 +110,32 @@ func newInstaller(cfg InstallConfig) (*Installer, error) {
 		displayName = fallbackName
 	}
 
+	bootMode := normalizeBootMode(cfg.BootMode)
+	if !validateBootMode(bootMode) {
+		os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("unsupported boot mode %q", cfg.BootMode)
+	}
+
+	var firmware ovmfFirmware
+	if bootMode == bootModeUEFI {
+		firmware, err = findOVMFFirmware()
+		if err != nil {
+			os.RemoveAll(tmpDir)
+			return nil, err
+		}
+	}
+
 	return &Installer{
-		ubuntuISO: cfg.UbuntuISO,
-		imagePath: cfg.ImagePath,
-		userData:  cfg.UserData,
-		diskSize:  cfg.DiskSize,
-		diskFmt:   strings.ToLower(cfg.DiskFormat),
-		display:   displayName,
-		tempDir:   tmpDir,
+		ubuntuISO:            cfg.UbuntuISO,
+		imagePath:            cfg.ImagePath,
+		userData:             cfg.UserData,
+		diskSize:             cfg.DiskSize,
+		diskFmt:              strings.ToLower(cfg.DiskFormat),
+		bootMode:             bootMode,
+		ovmfCodePath:         firmware.CodePath,
+		ovmfVarsTemplatePath: firmware.VarsPath,
+		display:              displayName,
+		tempDir:              tmpDir,
 	}, nil
 }
 
@@ -111,12 +151,26 @@ func (i *Installer) cleanup() {
 }
 
 func checkPrerequisites(cfg InstallConfig) error {
+	bootMode := normalizeBootMode(cfg.BootMode)
+	if !validateBootMode(bootMode) {
+		return fmt.Errorf("unsupported boot mode %q", cfg.BootMode)
+	}
+	if bootMode == bootModeUEFI {
+		if err := validateUEFIPortableUserData(cfg.UserData); err != nil {
+			return err
+		}
+	}
 	if _, err := exec.LookPath("qemu-system-x86_64"); err != nil {
 		return errors.New("missing required dependency: qemu-system-x86_64")
 	}
 	if cfg.DiskFormat == "qcow2" || cfg.DiskFormat == "vmdk" {
 		if _, err := exec.LookPath("qemu-img"); err != nil {
 			return errors.New("missing required dependency: qemu-img")
+		}
+	}
+	if bootMode == bootModeUEFI {
+		if _, err := findOVMFFirmware(); err != nil {
+			return err
 		}
 	}
 	if err := checkKVMAccess(); err != nil {
@@ -172,6 +226,7 @@ func collectPrerequisites() prerequisiteReport {
 		goPrerequisite(),
 		commandPrerequisite("qemu-system-x86_64", "QEMU system emulator used to boot the Ubuntu installer.", true, installCmd),
 		commandPrerequisite("qemu-img", "QEMU image tool used when creating qcow2 or vmdk images.", false, installCmd),
+		ovmfPrerequisite(osInfo),
 		kvmPrerequisite(osInfo),
 	}
 
@@ -196,6 +251,97 @@ func commandPrerequisite(command, description string, required bool, suggestion 
 		item.Detail = "not found in PATH"
 	}
 	return item
+}
+
+func ovmfPrerequisite(osInfo OSInfo) prerequisiteItem {
+	firmware, err := findOVMFFirmware()
+	item := prerequisiteItem{
+		Name:        "OVMF UEFI firmware",
+		Description: "Required for the default --boot-mode uefi. Not required when using --boot-mode bios.",
+		Required:    true,
+		OK:          err == nil,
+		Suggestion:  ovmfInstallSuggestion(osInfo),
+	}
+	if err == nil {
+		item.Detail = fmt.Sprintf("CODE: %s; VARS: %s", firmware.CodePath, firmware.VarsPath)
+		return item
+	}
+
+	item.Detail = err.Error()
+	return item
+}
+
+func ovmfInstallSuggestion(osInfo OSInfo) string {
+	if osInfo.GOOS != "linux" {
+		return "Use a Linux host with OVMF installed, or pass --boot-mode bios."
+	}
+	switch {
+	case osInfo.HasID("debian", "ubuntu"):
+		return "sudo apt update && sudo apt install -y ovmf, or pass --boot-mode bios"
+	case osInfo.HasID("fedora", "rhel", "centos", "rocky", "almalinux"):
+		return "sudo dnf install -y edk2-ovmf, or pass --boot-mode bios"
+	case osInfo.HasID("arch"):
+		return "sudo pacman -S edk2-ovmf, or pass --boot-mode bios"
+	case osInfo.HasID("opensuse", "suse"):
+		return "sudo zypper install ovmf, or pass --boot-mode bios"
+	default:
+		return "Install the package that provides OVMF UEFI firmware for this Linux distribution, or pass --boot-mode bios."
+	}
+}
+
+func normalizeBootMode(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return defaultBootMode
+	}
+	return mode
+}
+
+func validateBootMode(mode string) bool {
+	mode = normalizeBootMode(mode)
+	return mode == bootModeUEFI || mode == bootModeBIOS
+}
+
+func findOVMFFirmware() (ovmfFirmware, error) {
+	return findOVMFFirmwareIn(ovmfFirmwareCandidates)
+}
+
+func findOVMFFirmwareIn(candidates []ovmfFirmware) (ovmfFirmware, error) {
+	for _, candidate := range candidates {
+		if isRegularFile(candidate.CodePath) && isRegularFile(candidate.VarsPath) {
+			return candidate, nil
+		}
+	}
+	return ovmfFirmware{}, errors.New("missing OVMF UEFI firmware; install OVMF or use --boot-mode bios")
+}
+
+func isRegularFile(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+func copyFile(sourcePath, destinationPath string) error {
+	in, err := os.Open(sourcePath)
+	if err != nil {
+		return fmt.Errorf("open %q: %w", sourcePath, err)
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(destinationPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("create %q: %w", destinationPath, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return fmt.Errorf("copy %q to %q: %w", sourcePath, destinationPath, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close %q: %w", destinationPath, err)
+	}
+	return nil
 }
 
 func goPrerequisite() prerequisiteItem {
@@ -425,6 +571,7 @@ func printPrerequisiteReport(out io.Writer, report prerequisiteReport) {
 	fmt.Fprintln(out, "Install input prerequisites checked during normal install runs:")
 	fmt.Fprintln(out, "- Ubuntu live-server ISO containing /casper/vmlinuz and /casper/initrd")
 	fmt.Fprintln(out, "- cloud-init autoinstall user-data YAML with a top-level autoinstall mapping")
+	fmt.Fprintln(out, "- UEFI-compatible user-data with an ESP and fallback bootloader command when using --boot-mode uefi")
 	fmt.Fprintln(out, "- destination image path that does not already exist")
 	fmt.Fprintln(out, "- writable destination image directory")
 	fmt.Fprintln(out, "- valid disk size such as 20G")
@@ -516,25 +663,9 @@ func loadUserData(path string) ([]byte, string, error) {
 }
 
 func validateUserData(data []byte) (string, error) {
-	var root yaml.Node
-	if err := yaml.Unmarshal(data, &root); err != nil {
-		return "", fmt.Errorf("parse YAML: %w", err)
-	}
-
-	node := &root
-	if root.Kind == yaml.DocumentNode {
-		if len(root.Content) == 0 {
-			return "", errors.New("YAML document is empty")
-		}
-		node = root.Content[0]
-	}
-	if node.Kind != yaml.MappingNode {
-		return "", errors.New("top-level YAML document must be a mapping")
-	}
-
-	autoinstall := mappingValue(node, "autoinstall")
-	if autoinstall == nil || autoinstall.Kind != yaml.MappingNode {
-		return "", errors.New("top-level autoinstall mapping is required")
+	autoinstall, err := parseAutoinstallMapping(data)
+	if err != nil {
+		return "", err
 	}
 
 	identity := mappingValue(autoinstall, "identity")
@@ -547,6 +678,175 @@ func validateUserData(data []byte) (string, error) {
 		return "", nil
 	}
 	return strings.TrimSpace(hostname.Value), nil
+}
+
+func validateUEFIPortableUserData(data []byte) error {
+	autoinstall, err := parseAutoinstallMapping(data)
+	if err != nil {
+		return fmt.Errorf("UEFI user-data compatibility check failed: %w", err)
+	}
+
+	if !hasPortableUEFIFallbackCommand(autoinstall) {
+		return uefiCompatibilityError("missing autoinstall.late-commands entry that installs a fallback UEFI bootloader")
+	}
+
+	storage := mappingValue(autoinstall, "storage")
+	if storage == nil {
+		return nil
+	}
+	if storage.Kind != yaml.MappingNode {
+		return uefiCompatibilityError("autoinstall.storage must be a mapping when present")
+	}
+
+	config := mappingValue(storage, "config")
+	if config == nil {
+		return nil
+	}
+	if config.Kind != yaml.SequenceNode {
+		return uefiCompatibilityError("autoinstall.storage.config must be a list when present")
+	}
+	if !storageConfigHasUEFIESP(config) {
+		return uefiCompatibilityError("custom autoinstall.storage.config must define a GPT EFI System Partition formatted as FAT and mounted at /boot/efi")
+	}
+
+	return nil
+}
+
+func parseAutoinstallMapping(data []byte) (*yaml.Node, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("parse YAML: %w", err)
+	}
+
+	node := &root
+	if root.Kind == yaml.DocumentNode {
+		if len(root.Content) == 0 {
+			return nil, errors.New("YAML document is empty")
+		}
+		node = root.Content[0]
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil, errors.New("top-level YAML document must be a mapping")
+	}
+
+	autoinstall := mappingValue(node, "autoinstall")
+	if autoinstall == nil || autoinstall.Kind != yaml.MappingNode {
+		return nil, errors.New("top-level autoinstall mapping is required")
+	}
+
+	return autoinstall, nil
+}
+
+func hasPortableUEFIFallbackCommand(autoinstall *yaml.Node) bool {
+	lateCommands := mappingValue(autoinstall, "late-commands")
+	if lateCommands == nil || lateCommands.Kind != yaml.SequenceNode {
+		return false
+	}
+	for _, commandNode := range lateCommands.Content {
+		if isPortableUEFIFallbackCommand(commandNodeText(commandNode)) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandNodeText(node *yaml.Node) string {
+	switch {
+	case node == nil:
+		return ""
+	case node.Kind == yaml.ScalarNode:
+		return node.Value
+	case node.Kind == yaml.SequenceNode:
+		var parts []string
+		for _, child := range node.Content {
+			if child.Kind == yaml.ScalarNode {
+				parts = append(parts, child.Value)
+			}
+		}
+		return strings.Join(parts, " ")
+	default:
+		return ""
+	}
+}
+
+func isPortableUEFIFallbackCommand(command string) bool {
+	command = strings.ToLower(command)
+	if strings.Contains(command, "grub-install") && strings.Contains(command, "--removable") {
+		return true
+	}
+	command = strings.ReplaceAll(command, "\\", "/")
+	return strings.Contains(command, "efi/boot/bootx64.efi")
+}
+
+func storageConfigHasUEFIESP(config *yaml.Node) bool {
+	gptDisks := make(map[string]bool)
+	bootPartitionDevice := make(map[string]string)
+	fatFormatForVolume := make(map[string]string)
+	efiMountDevices := make(map[string]bool)
+
+	for _, action := range config.Content {
+		if action.Kind != yaml.MappingNode {
+			continue
+		}
+		id := mappingScalarValue(action, "id")
+		switch mappingScalarValue(action, "type") {
+		case "disk":
+			if id != "" && mappingScalarValue(action, "ptable") == "gpt" {
+				gptDisks[id] = true
+			}
+		case "partition":
+			deviceID := mappingScalarValue(action, "device")
+			if id != "" && deviceID != "" && mappingScalarValue(action, "flag") == "boot" {
+				bootPartitionDevice[id] = deviceID
+			}
+		case "format":
+			volumeID := mappingScalarValue(action, "volume")
+			if id != "" && volumeID != "" && isFATFilesystem(mappingScalarValue(action, "fstype")) {
+				fatFormatForVolume[volumeID] = id
+			}
+		case "mount":
+			deviceID := mappingScalarValue(action, "device")
+			if deviceID != "" && mappingScalarValue(action, "path") == "/boot/efi" {
+				efiMountDevices[deviceID] = true
+			}
+		}
+	}
+
+	for partitionID, deviceID := range bootPartitionDevice {
+		if !gptDisks[deviceID] {
+			continue
+		}
+		formatID := fatFormatForVolume[partitionID]
+		if formatID == "" {
+			continue
+		}
+		if efiMountDevices[formatID] || efiMountDevices[partitionID] {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isFATFilesystem(fstype string) bool {
+	switch strings.ToLower(strings.TrimSpace(fstype)) {
+	case "fat", "fat16", "fat32", "vfat":
+		return true
+	default:
+		return false
+	}
+}
+
+func mappingScalarValue(node *yaml.Node, key string) string {
+	value := mappingValue(node, key)
+	if value == nil || value.Kind != yaml.ScalarNode {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(value.Value))
+}
+
+func uefiCompatibilityError(reason string) error {
+	return fmt.Errorf("UEFI user-data is not portable as a single image: %s. Add an EFI System Partition mounted at /boot/efi and a late-command such as: curtin in-target --target=/target -- grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu --removable --recheck", reason)
 }
 
 func mappingValue(node *yaml.Node, key string) *yaml.Node {
@@ -740,26 +1040,56 @@ func signalToSyscall(sig os.Signal) syscall.Signal {
 	return syscall.SIGTERM
 }
 
-func (i *Installer) qemuArgs(seedISOPath, kernelPath, initrdPath string) []string {
-	return []string{
+func (i *Installer) qemuArgs(seedISOPath, kernelPath, initrdPath string) ([]string, error) {
+	args := []string{
 		"--enable-kvm",
 		"-no-reboot",
 		"-m", "2048",
 		"-nographic",
+	}
+
+	if i.bootMode == bootModeUEFI {
+		firmwareArgs, err := i.uefiFirmwareArgs()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, firmwareArgs...)
+	}
+
+	args = append(args,
 		"-drive", fmt.Sprintf("file=%s,format=%s,cache=none,if=virtio", i.imagePath, i.diskFmt),
-		"-drive", fmt.Sprintf("file=%s,media=cdrom", i.ubuntuISO),
-		"-drive", fmt.Sprintf("file=%s,media=cdrom", seedISOPath),
+		"-drive", fmt.Sprintf("file=%s,format=raw,readonly=on,if=virtio", i.ubuntuISO),
+		"-drive", fmt.Sprintf("file=%s,format=raw,readonly=on,if=virtio", seedISOPath),
 		"-kernel", kernelPath,
 		"-initrd", initrdPath,
 		"-append", "autoinstall console=ttyS0,115200n8 ---",
+	)
+	return args, nil
+}
+
+func (i *Installer) uefiFirmwareArgs() ([]string, error) {
+	varsPath := filepath.Join(i.tempDir, "OVMF_VARS.fd")
+	if err := copyFile(i.ovmfVarsTemplatePath, varsPath); err != nil {
+		return nil, fmt.Errorf("prepare OVMF variables store: %w", err)
 	}
+
+	return []string{
+		"-drive", fmt.Sprintf("if=pflash,format=raw,readonly=on,file=%s", i.ovmfCodePath),
+		"-drive", fmt.Sprintf("if=pflash,format=raw,file=%s", varsPath),
+	}, nil
 }
 
 func (i *Installer) runQemuInstallation(seedISOPath, kernelPath, initrdPath string) bool {
 	fmt.Println("Starting QEMU installation...")
 	fmt.Println("This may take several minutes. The VM will automatically shut down when installation is complete.")
 
-	cmd := exec.Command("qemu-system-x86_64", i.qemuArgs(seedISOPath, kernelPath, initrdPath)...)
+	args, err := i.qemuArgs(seedISOPath, kernelPath, initrdPath)
+	if err != nil {
+		fmt.Printf("Installation failed: %v\n", err)
+		return false
+	}
+
+	cmd := exec.Command("qemu-system-x86_64", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -767,7 +1097,7 @@ func (i *Installer) runQemuInstallation(seedISOPath, kernelPath, initrdPath stri
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
-	err := runInterruptibleCommand(cmd, signals, qemuInterruptGrace)
+	err = runInterruptibleCommand(cmd, signals, qemuInterruptGrace)
 	if err == nil {
 		fmt.Println("OK installation completed successfully")
 		return true
@@ -780,6 +1110,7 @@ func (i *Installer) runQemuInstallation(seedISOPath, kernelPath, initrdPath stri
 func (i *Installer) install() bool {
 	fmt.Printf("\n%s\n", strings.Repeat("=", 60))
 	fmt.Printf("Installing: %s -> %s\n", i.display, i.imagePath)
+	fmt.Printf("Boot mode: %s\n", i.bootMode)
 	fmt.Printf("%s\n", strings.Repeat("=", 60))
 
 	defer i.cleanup()
@@ -806,10 +1137,20 @@ func (i *Installer) install() bool {
 		fmt.Printf("\nOK installation completed successfully for %s\n", i.display)
 		fmt.Printf("  Image: %s\n", i.imagePath)
 		fmt.Printf("  Disk format: %s\n", i.diskFmt)
-		fmt.Printf("  To boot: qemu-system-x86_64 --enable-kvm -m 2048 -drive file=%s,format=%s\n", i.imagePath, i.diskFmt)
+		fmt.Printf("  Boot mode: %s\n", i.bootMode)
+		fmt.Printf("  To boot: %s\n", i.bootCommandHint())
 	}
 
 	return success
+}
+
+func (i *Installer) bootCommandHint() string {
+	diskDrive := fmt.Sprintf("-drive file=%s,format=%s,if=virtio", i.imagePath, i.diskFmt)
+	if i.bootMode != bootModeUEFI {
+		return fmt.Sprintf("qemu-system-x86_64 --enable-kvm -m 2048 %s", diskDrive)
+	}
+
+	return fmt.Sprintf("create a VM with EFI/UEFI firmware and attach %s as the boot disk", i.imagePath)
 }
 
 func parseDiskSize(size string) (int64, error) {
@@ -926,6 +1267,7 @@ func main() {
 		userDataPath string
 		diskFormat   string
 		diskSize     string
+		bootMode     string
 	)
 
 	flag.StringVar(&isoPath, "iso", "", "Ubuntu ISO file path")
@@ -933,6 +1275,7 @@ func main() {
 	flag.StringVar(&userDataPath, "user-data", "", "cloud-init autoinstall user-data file")
 	flag.StringVar(&diskFormat, "disk-format", defaultDiskFmt, "Disk image format (raw, vmdk, or qcow2)")
 	flag.StringVar(&diskSize, "disk-size", "", "Disk image size (e.g., 20G, 50G)")
+	flag.StringVar(&bootMode, "boot-mode", defaultBootMode, "Boot firmware mode (uefi or bios)")
 	flag.Usage = func() {
 		printUsage(flag.CommandLine.Output(), os.Args[0])
 	}
@@ -956,6 +1299,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	bootMode = normalizeBootMode(bootMode)
+	if !validateBootMode(bootMode) {
+		fmt.Fprintf(os.Stderr, "Error: unsupported --boot-mode %q. Supported values: uefi, bios\n", bootMode)
+		os.Exit(1)
+	}
+
 	userData, hostname, err := loadUserData(userDataPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -973,6 +1322,7 @@ func main() {
 		UserData:     userData,
 		DiskSize:     diskSize,
 		DiskFormat:   diskFormat,
+		BootMode:     bootMode,
 		DisplayName:  displayName,
 	}
 
@@ -996,7 +1346,7 @@ func main() {
 }
 
 func printUsage(out io.Writer, program string) {
-	fmt.Fprintf(out, "Usage: %s --iso ubuntu.iso --image output.img --disk-size 20G --user-data autoinstall.yaml [--disk-format raw|qcow2|vmdk]\n", program)
+	fmt.Fprintf(out, "Usage: %s --iso ubuntu.iso --image output.img --disk-size 20G --user-data autoinstall.yaml [--disk-format raw|qcow2|vmdk] [--boot-mode uefi|bios]\n", program)
 	fmt.Fprintf(out, "       %s prerequisites\n\n", program)
 	fmt.Fprintln(out, "Commands:")
 	fmt.Fprintln(out, "  prerequisites")
@@ -1014,6 +1364,8 @@ func printUsage(out io.Writer, program string) {
 	fmt.Fprintln(out, "        cloud-init autoinstall user-data file")
 	fmt.Fprintln(out, "  --disk-format string")
 	fmt.Fprintln(out, "        Disk image format: raw, qcow2, or vmdk (default \"raw\")")
+	fmt.Fprintln(out, "  --boot-mode string")
+	fmt.Fprintln(out, "        Boot firmware mode: uefi or bios (default \"uefi\")")
 }
 
 func extractFileFromISO(isoPath, sourcePath, destinationPath string) error {

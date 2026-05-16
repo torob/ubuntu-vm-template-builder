@@ -35,6 +35,108 @@ func TestValidateUserDataRequiresAutoinstall(t *testing.T) {
 	}
 }
 
+func TestValidateUEFIPortableUserDataAcceptsDefaultStorageWithFallback(t *testing.T) {
+	data := []byte(`#cloud-config
+autoinstall:
+  version: 1
+  late-commands:
+    - curtin in-target --target=/target -- grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu --removable --recheck
+`)
+
+	if err := validateUEFIPortableUserData(data); err != nil {
+		t.Fatalf("validateUEFIPortableUserData returned error: %v", err)
+	}
+}
+
+func TestValidateUEFIPortableUserDataAcceptsCustomESPAndFallback(t *testing.T) {
+	data := []byte(`#cloud-config
+autoinstall:
+  version: 1
+  storage:
+    config:
+      - id: disk0
+        type: disk
+        ptable: gpt
+      - id: part-efi
+        type: partition
+        device: disk0
+        size: 512M
+        flag: boot
+      - id: fs-efi
+        type: format
+        volume: part-efi
+        fstype: fat32
+      - id: mount-efi
+        type: mount
+        device: fs-efi
+        path: /boot/efi
+  late-commands:
+    - cp /target/boot/efi/EFI/ubuntu/grubx64.efi /target/boot/efi/EFI/BOOT/BOOTX64.EFI
+`)
+
+	if err := validateUEFIPortableUserData(data); err != nil {
+		t.Fatalf("validateUEFIPortableUserData returned error: %v", err)
+	}
+}
+
+func TestValidateUEFIPortableUserDataRejectsMissingFallback(t *testing.T) {
+	data := []byte(`#cloud-config
+autoinstall:
+  version: 1
+  storage:
+    layout:
+      name: direct
+`)
+
+	err := validateUEFIPortableUserData(data)
+	if err == nil {
+		t.Fatal("validateUEFIPortableUserData returned nil error without fallback command")
+	}
+	if !strings.Contains(err.Error(), "late-commands") || !strings.Contains(err.Error(), "--removable") {
+		t.Fatalf("error %q does not explain missing fallback command", err.Error())
+	}
+}
+
+func TestValidateUEFIPortableUserDataRejectsBIOSStorage(t *testing.T) {
+	data := []byte(`#cloud-config
+autoinstall:
+  version: 1
+  storage:
+    config:
+      - id: disk0
+        type: disk
+        ptable: gpt
+      - id: part-bios
+        type: partition
+        device: disk0
+        size: 1M
+        flag: bios_grub
+      - id: part-boot
+        type: partition
+        device: disk0
+        size: 1G
+        flag: boot
+      - id: fs-boot
+        type: format
+        volume: part-boot
+        fstype: ext4
+      - id: mount-boot
+        type: mount
+        device: fs-boot
+        path: /boot
+  late-commands:
+    - curtin in-target --target=/target -- grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu --removable --recheck
+`)
+
+	err := validateUEFIPortableUserData(data)
+	if err == nil {
+		t.Fatal("validateUEFIPortableUserData returned nil error for BIOS-style storage")
+	}
+	if !strings.Contains(err.Error(), "EFI System Partition") || !strings.Contains(err.Error(), "/boot/efi") {
+		t.Fatalf("error %q does not explain missing ESP", err.Error())
+	}
+}
+
 func TestParseDiskSize(t *testing.T) {
 	tests := map[string]int64{
 		"1024": 1024,
@@ -85,6 +187,26 @@ func TestCheckOutputPathAcceptsWritableParent(t *testing.T) {
 	}
 }
 
+func TestNormalizeBootModeDefaultsToUEFI(t *testing.T) {
+	if got := normalizeBootMode(""); got != bootModeUEFI {
+		t.Fatalf("normalizeBootMode empty = %q, want %q", got, bootModeUEFI)
+	}
+	if got := normalizeBootMode(" BIOS "); got != bootModeBIOS {
+		t.Fatalf("normalizeBootMode trims and lowercases to %q, want %q", got, bootModeBIOS)
+	}
+}
+
+func TestValidateBootMode(t *testing.T) {
+	for _, mode := range []string{"", "uefi", "UEFI", "bios", " BIOS "} {
+		if !validateBootMode(mode) {
+			t.Fatalf("validateBootMode(%q) = false, want true", mode)
+		}
+	}
+	if validateBootMode("legacy") {
+		t.Fatal("validateBootMode returned true for unsupported mode")
+	}
+}
+
 func TestRunInterruptibleCommandStopsProcessOnInterrupt(t *testing.T) {
 	if _, err := exec.LookPath("sleep"); err != nil {
 		t.Skip("sleep command is not available")
@@ -123,11 +245,18 @@ func TestQemuArgsUseNographicSerialConsole(t *testing.T) {
 		ubuntuISO: "ubuntu.iso",
 		imagePath: "output.img",
 		diskFmt:   "raw",
+		bootMode:  bootModeBIOS,
 	}
 
-	args := installer.qemuArgs("seed.iso", "vmlinuz", "initrd")
+	args, err := installer.qemuArgs("seed.iso", "vmlinuz", "initrd")
+	if err != nil {
+		t.Fatalf("qemuArgs returned error: %v", err)
+	}
 	if !hasArg(args, "-nographic") {
 		t.Fatalf("qemu args %v do not contain -nographic", args)
+	}
+	if hasArg(args, "if=pflash,format=raw,readonly=on,file=OVMF_CODE.fd") {
+		t.Fatalf("bios qemu args %v unexpectedly contain OVMF pflash", args)
 	}
 	if hasArgPair(args, "-display", "none") {
 		t.Fatalf("qemu args %v still contain -display none", args)
@@ -135,6 +264,86 @@ func TestQemuArgsUseNographicSerialConsole(t *testing.T) {
 	appendValue := valueAfterArg(args, "-append")
 	if !strings.Contains(appendValue, "console=ttyS0,115200n8") {
 		t.Fatalf("qemu -append value %q does not enable ttyS0 console", appendValue)
+	}
+	if !hasArgPair(args, "-drive", "file=ubuntu.iso,format=raw,readonly=on,if=virtio") {
+		t.Fatalf("qemu args %v do not attach Ubuntu ISO as virtio block", args)
+	}
+	if !hasArgPair(args, "-drive", "file=seed.iso,format=raw,readonly=on,if=virtio") {
+		t.Fatalf("qemu args %v do not attach seed ISO as virtio block", args)
+	}
+	for _, arg := range args {
+		if strings.Contains(arg, "media=cdrom") {
+			t.Fatalf("qemu args %v still attach ISOs with media=cdrom", args)
+		}
+	}
+}
+
+func TestQemuArgsUEFIUsesOVMFPFlash(t *testing.T) {
+	dir := t.TempDir()
+	codePath := filepath.Join(dir, "OVMF_CODE.fd")
+	varsTemplatePath := filepath.Join(dir, "OVMF_VARS_TEMPLATE.fd")
+	if err := os.WriteFile(codePath, []byte("code"), 0o644); err != nil {
+		t.Fatalf("write code file: %v", err)
+	}
+	if err := os.WriteFile(varsTemplatePath, []byte("vars"), 0o644); err != nil {
+		t.Fatalf("write vars template: %v", err)
+	}
+
+	installer := &Installer{
+		ubuntuISO:            "ubuntu.iso",
+		imagePath:            "output.img",
+		diskFmt:              "raw",
+		bootMode:             bootModeUEFI,
+		ovmfCodePath:         codePath,
+		ovmfVarsTemplatePath: varsTemplatePath,
+		tempDir:              dir,
+	}
+
+	args, err := installer.qemuArgs("seed.iso", "vmlinuz", "initrd")
+	if err != nil {
+		t.Fatalf("qemuArgs returned error: %v", err)
+	}
+
+	if !hasArgPair(args, "-drive", "if=pflash,format=raw,readonly=on,file="+codePath) {
+		t.Fatalf("uefi qemu args %v do not contain readonly OVMF code pflash", args)
+	}
+	varsPath := filepath.Join(dir, "OVMF_VARS.fd")
+	if !hasArgPair(args, "-drive", "if=pflash,format=raw,file="+varsPath) {
+		t.Fatalf("uefi qemu args %v do not contain writable OVMF vars pflash", args)
+	}
+	copied, err := os.ReadFile(varsPath)
+	if err != nil {
+		t.Fatalf("read copied vars file: %v", err)
+	}
+	if string(copied) != "vars" {
+		t.Fatalf("copied vars = %q, want vars", copied)
+	}
+}
+
+func TestFindOVMFFirmwareInUsesFirstCompletePair(t *testing.T) {
+	dir := t.TempDir()
+	incompleteCode := filepath.Join(dir, "incomplete-code.fd")
+	completeCode := filepath.Join(dir, "complete-code.fd")
+	completeVars := filepath.Join(dir, "complete-vars.fd")
+	if err := os.WriteFile(incompleteCode, []byte("code"), 0o644); err != nil {
+		t.Fatalf("write incomplete code: %v", err)
+	}
+	if err := os.WriteFile(completeCode, []byte("code"), 0o644); err != nil {
+		t.Fatalf("write complete code: %v", err)
+	}
+	if err := os.WriteFile(completeVars, []byte("vars"), 0o644); err != nil {
+		t.Fatalf("write complete vars: %v", err)
+	}
+
+	got, err := findOVMFFirmwareIn([]ovmfFirmware{
+		{CodePath: incompleteCode, VarsPath: filepath.Join(dir, "missing-vars.fd")},
+		{CodePath: completeCode, VarsPath: completeVars},
+	})
+	if err != nil {
+		t.Fatalf("findOVMFFirmwareIn returned error: %v", err)
+	}
+	if got.CodePath != completeCode || got.VarsPath != completeVars {
+		t.Fatalf("findOVMFFirmwareIn = %+v, want complete pair", got)
 	}
 }
 
@@ -204,6 +413,19 @@ func TestQemuInstallSuggestionDebianFamily(t *testing.T) {
 	got := qemuInstallSuggestion(osInfo)
 	if !strings.Contains(got, "apt install") || !strings.Contains(got, "qemu-system-x86") || !strings.Contains(got, "qemu-utils") {
 		t.Fatalf("qemuInstallSuggestion returned %q, want apt qemu packages", got)
+	}
+}
+
+func TestOVMFInstallSuggestionDebianFamily(t *testing.T) {
+	osInfo := OSInfo{
+		GOOS:   "linux",
+		ID:     "debian",
+		IDLike: []string{"debian"},
+	}
+
+	got := ovmfInstallSuggestion(osInfo)
+	if !strings.Contains(got, "apt install") || !strings.Contains(got, "ovmf") || !strings.Contains(got, "--boot-mode bios") {
+		t.Fatalf("ovmfInstallSuggestion returned %q, want apt ovmf package and bios fallback", got)
 	}
 }
 
@@ -283,5 +505,8 @@ func TestPrintUsageMentionsPrerequisitesCommand(t *testing.T) {
 	}
 	if !strings.Contains(output, "Aliases: prereqs, prerequests, prequests") {
 		t.Fatalf("usage does not mention prerequisites aliases:\n%s", output)
+	}
+	if !strings.Contains(output, "--boot-mode string") {
+		t.Fatalf("usage does not mention boot mode flag:\n%s", output)
 	}
 }
