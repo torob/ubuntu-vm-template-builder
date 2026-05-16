@@ -110,6 +110,25 @@ Supported boot modes are `uefi` and `bios`; `uefi` is the default. Use
 installed image. UEFI installs use a temporary OVMF variables file during QEMU
 installation; the disk image is the only persistent output file.
 
+## Releases
+
+Releases are published with the manual `Release` GitHub Actions workflow. Create
+and push a SemVer tag first:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Then run the `Release` workflow from the GitHub Actions UI and enter that tag.
+The workflow builds the Linux amd64 binary, uploads it and its SHA-256 checksum
+to the GitHub Release, and pushes the Docker image to GHCR:
+
+```text
+ghcr.io/torob/ubuntu-vm-template-builder:v0.1.0
+ghcr.io/torob/ubuntu-vm-template-builder:latest
+```
+
 ## BIOS and UEFI Booting
 
 BIOS and UEFI find the operating system in different ways.
