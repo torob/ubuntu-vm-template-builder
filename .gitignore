@@ -1,5 +1,6 @@
 # Built binaries
 /install-ubuntu
+/e2e-matrix
 
 # Downloaded Ubuntu release artifacts
 /*.iso
@@ -11,6 +12,10 @@
 /*.qcow2
 /*.vmdk
 /*.raw
+
+# End-to-end matrix runner cache and artifacts
+/.e2e-cache/
+/.e2e-runs/
 
 # Local editor and OS files
 .DS_Store

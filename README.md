@@ -129,3 +129,55 @@ NVRAM state.
 
 See `autoinstall.uefi.example.yaml` for the UEFI example and
 `autoinstall.bios.example.yaml` for the BIOS example.
+
+## End-to-End Matrix Tests
+
+The repository includes a Go-based matrix runner for testing generated images
+across Ubuntu versions, disk formats, and boot modes:
+
+```bash
+go run ./cmd/e2e-matrix --config e2e.config.yaml --dry-run
+```
+
+To run the matrix:
+
+```bash
+go run ./cmd/e2e-matrix --config e2e.config.yaml
+```
+
+The config file provides the ISO download URLs directly:
+
+```yaml
+ubuntu_versions:
+  - name: "22.04"
+    iso_url: "https://releases.ubuntu.com/22.04/ubuntu-22.04.5-live-server-amd64.iso"
+    sha256: "9bc6028870aef3f74f4e16b900008179e78b130e6b0b9a140635434a46aa98b0"
+  - name: "24.04"
+    iso_url: "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso"
+    sha256: "e907d92eeec9df64163a7e454cbc8d7755e8ddc7ed42f99dbc80c40f1a138433"
+  - name: "26.04"
+    iso_url: "https://releases.ubuntu.com/26.04/ubuntu-26.04-live-server-amd64.iso"
+    sha256: "dec49008a71f6098d0bcfc822021f4d042d5f2db279e4d75bdd981304f1ca5d9"
+```
+
+The runner downloads and caches ISOs under `.e2e-cache/isos`, builds
+`./install-ubuntu`, creates one isolated run directory under `.e2e-runs`, and
+executes every `ubuntu_versions x disk_formats x boot_modes` case. Each case
+generates its own autoinstall YAML and SSH key, installs the image, boots it with
+QEMU, then verifies SSH login, hostname, sudo password, authorized key, and the
+expected BIOS or UEFI boot layout.
+
+Before running, it checks the host tools it needs: QEMU, KVM access, `ssh`,
+`ssh-keygen`, `qemu-img` when needed, and OVMF when UEFI cases are selected.
+
+Useful flags:
+
+```bash
+go run ./cmd/e2e-matrix --config e2e.config.yaml --concurrency 2
+go run ./cmd/e2e-matrix --config e2e.config.yaml --keep all
+go run ./cmd/e2e-matrix --config e2e.config.yaml --keep none
+```
+
+`keep` can be `all`, `failures`, or `none`. The default is `failures`, which
+keeps failed case directories with `install.log`, `boot.log`, generated
+user-data, SSH key, and disk image for inspection.
