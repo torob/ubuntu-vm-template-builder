@@ -35,7 +35,7 @@ go run . \
   --iso /path/to/ubuntu-24.04.3-live-server-amd64.iso \
   --image /path/to/output.img \
   --disk-size 20G \
-  --user-data autoinstall.example.yaml
+  --user-data autoinstall.uefi.example.yaml
 ```
 
 Build a binary:
@@ -53,7 +53,19 @@ Then run:
   --disk-size 20G \
   --boot-mode uefi \
   --disk-format raw \
-  --user-data autoinstall.example.yaml
+  --user-data autoinstall.uefi.example.yaml
+```
+
+For a BIOS-installed image, use the BIOS example and select BIOS explicitly:
+
+```bash
+./install-ubuntu \
+  --iso /path/to/ubuntu-24.04.3-live-server-amd64.iso \
+  --image /path/to/output.img \
+  --disk-size 20G \
+  --boot-mode bios \
+  --disk-format raw \
+  --user-data autoinstall.bios.example.yaml
 ```
 
 Supported disk formats are `raw`, `qcow2`, and `vmdk`.
@@ -78,4 +90,5 @@ The user-data must also include a fallback UEFI bootloader late-command, such as
 `grub-install --removable`, so the disk does not depend on QEMU's temporary UEFI
 NVRAM state.
 
-See `autoinstall.example.yaml` for a minimal example.
+See `autoinstall.uefi.example.yaml` for the UEFI example and
+`autoinstall.bios.example.yaml` for the BIOS example.

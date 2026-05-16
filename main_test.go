@@ -137,6 +137,30 @@ autoinstall:
 	}
 }
 
+func TestExampleUserDataFiles(t *testing.T) {
+	uefiData, err := os.ReadFile("autoinstall.uefi.example.yaml")
+	if err != nil {
+		t.Fatalf("read UEFI example: %v", err)
+	}
+	if _, err := validateUserData(uefiData); err != nil {
+		t.Fatalf("UEFI example failed user-data validation: %v", err)
+	}
+	if err := validateUEFIPortableUserData(uefiData); err != nil {
+		t.Fatalf("UEFI example failed UEFI portability validation: %v", err)
+	}
+
+	biosData, err := os.ReadFile("autoinstall.bios.example.yaml")
+	if err != nil {
+		t.Fatalf("read BIOS example: %v", err)
+	}
+	if _, err := validateUserData(biosData); err != nil {
+		t.Fatalf("BIOS example failed user-data validation: %v", err)
+	}
+	if err := validateUEFIPortableUserData(biosData); err == nil {
+		t.Fatal("BIOS example unexpectedly passed UEFI portability validation")
+	}
+}
+
 func TestParseDiskSize(t *testing.T) {
 	tests := map[string]int64{
 		"1024": 1024,
