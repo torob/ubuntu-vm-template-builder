@@ -487,7 +487,7 @@ func printCases(out io.Writer, cases []matrixCase) {
 }
 
 func buildInstaller(ctx context.Context, stdout, stderr io.Writer) (string, error) {
-	installerPath, err := filepath.Abs("install-ubuntu")
+	installerPath, err := filepath.Abs("ubuntu-vm-template-builder")
 	if err != nil {
 		return "", err
 	}
@@ -503,7 +503,7 @@ func buildInstaller(ctx context.Context, stdout, stderr io.Writer) (string, erro
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("build install-ubuntu: %w", err)
+		return "", fmt.Errorf("build ubuntu-vm-template-builder: %w", err)
 	}
 	return installerPath, nil
 }
@@ -853,7 +853,7 @@ func (result caseResult) withDuration(start time.Time) caseResult {
 }
 
 func generateKeypair(ctx context.Context, keyPath string) (string, error) {
-	cmd := exec.CommandContext(ctx, "ssh-keygen", "-t", "ed25519", "-N", "", "-f", keyPath, "-C", "ubuntu-autoinstall-e2e")
+	cmd := exec.CommandContext(ctx, "ssh-keygen", "-t", "ed25519", "-N", "", "-f", keyPath, "-C", "ubuntu-vm-template-builder-e2e")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("ssh-keygen failed: %w (%s)", err, strings.TrimSpace(string(out)))
 	}

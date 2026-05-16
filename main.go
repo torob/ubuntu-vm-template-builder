@@ -32,7 +32,7 @@ const (
 	defaultBootMode          = "uefi"
 	bootModeUEFI             = "uefi"
 	bootModeBIOS             = "bios"
-	fallbackName             = "ubuntu-autoinstall"
+	fallbackName             = "ubuntu-vm-template-builder"
 	qemuInterruptGrace       = 5 * time.Second
 )
 
@@ -351,7 +351,7 @@ func goPrerequisite() prerequisiteItem {
 		Description: "Required only when building from source or running with go run.",
 		Required:    false,
 		OK:          err == nil,
-		Suggestion:  "Install Go 1.26 or newer from https://go.dev/dl/ or use a prebuilt install-ubuntu binary.",
+		Suggestion:  "Install Go 1.26 or newer from https://go.dev/dl/ or use a prebuilt ubuntu-vm-template-builder binary.",
 	}
 	if err != nil {
 		item.Detail = "go not found in PATH"

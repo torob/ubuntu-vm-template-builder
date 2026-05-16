@@ -521,10 +521,10 @@ func TestPrintPrerequisiteReportIncludesSuggestions(t *testing.T) {
 
 func TestPrintUsageMentionsPrerequisitesCommand(t *testing.T) {
 	var out bytes.Buffer
-	printUsage(&out, "install-ubuntu")
+	printUsage(&out, "ubuntu-vm-template-builder")
 	output := out.String()
 
-	if !strings.Contains(output, "install-ubuntu prerequisites") {
+	if !strings.Contains(output, "ubuntu-vm-template-builder prerequisites") {
 		t.Fatalf("usage does not mention prerequisites command:\n%s", output)
 	}
 	if !strings.Contains(output, "Aliases: prereqs, prerequests, prequests") {

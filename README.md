@@ -1,11 +1,15 @@
-# Ubuntu Server Autoinstaller
+# Ubuntu VM Template Builder
 
-Automates Ubuntu Server image installation in QEMU using a cloud-init
+Builds reproducible Ubuntu VM template disk images in QEMU using a cloud-init
 autoinstall file that you provide directly.
 
 The tool creates a NoCloud seed ISO containing your `user-data`, creates the
 destination disk image, extracts the Ubuntu ISO kernel and initrd, and boots QEMU
 with `autoinstall ---`.
+
+It is intended to make Ubuntu VM template creation faster and repeatable: keep
+the autoinstall cloud-config in version control, run the builder, and import the
+resulting image into your virtualization platform as a template.
 
 ## Requirements
 
@@ -21,7 +25,7 @@ with `autoinstall ---`.
 Check host prerequisites:
 
 ```bash
-./install-ubuntu prerequisites
+./ubuntu-vm-template-builder prerequisites
 ```
 
 Aliases are `prereqs`, `prerequests`, and `prequests`. The command prints the
@@ -41,13 +45,13 @@ go run . \
 Build a binary:
 
 ```bash
-go build -o install-ubuntu .
+go build -o ubuntu-vm-template-builder .
 ```
 
 Then run:
 
 ```bash
-./install-ubuntu \
+./ubuntu-vm-template-builder \
   --iso /path/to/ubuntu-24.04.3-live-server-amd64.iso \
   --image /path/to/output.img \
   --disk-size 20G \
@@ -59,7 +63,7 @@ Then run:
 For a BIOS-installed image, use the BIOS example and select BIOS explicitly:
 
 ```bash
-./install-ubuntu \
+./ubuntu-vm-template-builder \
   --iso /path/to/ubuntu-24.04.3-live-server-amd64.iso \
   --image /path/to/output.img \
   --disk-size 20G \
@@ -161,11 +165,11 @@ ubuntu_versions:
 ```
 
 The runner downloads and caches ISOs under `.e2e-cache/isos`, builds
-`./install-ubuntu`, creates one isolated run directory under `.e2e-runs`, and
-executes every `ubuntu_versions x disk_formats x boot_modes` case. Each case
-generates its own autoinstall YAML and SSH key, installs the image, boots it with
-QEMU, then verifies SSH login, hostname, sudo password, authorized key, and the
-expected BIOS or UEFI boot layout.
+`./ubuntu-vm-template-builder`, creates one isolated run directory under
+`.e2e-runs`, and executes every `ubuntu_versions x disk_formats x boot_modes`
+case. Each case generates its own autoinstall YAML and SSH key, installs the
+image, boots it with QEMU, then verifies SSH login, hostname, sudo password,
+authorized key, and the expected BIOS or UEFI boot layout.
 
 Before running, it checks the host tools it needs: QEMU, KVM access, `ssh`,
 `ssh-keygen`, `qemu-img` when needed, and OVMF when UEFI cases are selected.

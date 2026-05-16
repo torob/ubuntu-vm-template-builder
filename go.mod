@@ -1,4 +1,4 @@
-module ubuntu-server-autoinstaller-go
+module ubuntu-vm-template-builder
 
 go 1.26.0
 

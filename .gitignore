@@ -1,5 +1,6 @@
 # Built binaries
 /install-ubuntu
+/ubuntu-vm-template-builder
 /e2e-matrix
 
 # Downloaded Ubuntu release artifacts
