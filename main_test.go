@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -162,4 +163,125 @@ func valueAfterArg(args []string, name string) string {
 		}
 	}
 	return ""
+}
+
+func TestIsPrerequisitesCommandAliases(t *testing.T) {
+	for _, command := range []string{"prerequisites", "prereqs", "prerequests", "prequests"} {
+		if !isPrerequisitesCommand(command) {
+			t.Fatalf("isPrerequisitesCommand(%q) = false, want true", command)
+		}
+	}
+	if isPrerequisitesCommand("install") {
+		t.Fatal("isPrerequisitesCommand returned true for install")
+	}
+}
+
+func TestParseOSRelease(t *testing.T) {
+	values := parseOSRelease([]byte(`NAME="Ubuntu"
+ID=ubuntu
+ID_LIKE="debian"
+VERSION_ID="26.04"
+`))
+
+	if values["NAME"] != "Ubuntu" {
+		t.Fatalf("NAME = %q, want Ubuntu", values["NAME"])
+	}
+	if values["ID"] != "ubuntu" {
+		t.Fatalf("ID = %q, want ubuntu", values["ID"])
+	}
+	if values["ID_LIKE"] != "debian" {
+		t.Fatalf("ID_LIKE = %q, want debian", values["ID_LIKE"])
+	}
+}
+
+func TestQemuInstallSuggestionDebianFamily(t *testing.T) {
+	osInfo := OSInfo{
+		GOOS:   "linux",
+		ID:     "ubuntu",
+		IDLike: []string{"debian"},
+	}
+
+	got := qemuInstallSuggestion(osInfo)
+	if !strings.Contains(got, "apt install") || !strings.Contains(got, "qemu-system-x86") || !strings.Contains(got, "qemu-utils") {
+		t.Fatalf("qemuInstallSuggestion returned %q, want apt qemu packages", got)
+	}
+}
+
+func TestGoVersionAtLeast(t *testing.T) {
+	tests := []struct {
+		output string
+		want   bool
+	}{
+		{output: "go version go1.26.2 linux/amd64", want: true},
+		{output: "go version go1.27.0 linux/amd64", want: true},
+		{output: "go version go1.25.9 linux/amd64", want: false},
+		{output: "not go output", want: false},
+	}
+
+	for _, test := range tests {
+		if got := goVersionAtLeast(test.output, 1, 26); got != test.want {
+			t.Fatalf("goVersionAtLeast(%q) = %v, want %v", test.output, got, test.want)
+		}
+	}
+}
+
+func TestPrerequisiteReportRequiredOK(t *testing.T) {
+	report := prerequisiteReport{
+		Items: []prerequisiteItem{
+			{Name: "required-ok", Required: true, OK: true},
+			{Name: "optional-missing", Required: false, OK: false},
+		},
+	}
+	if !report.RequiredOK() {
+		t.Fatal("RequiredOK returned false when only optional prerequisite is missing")
+	}
+
+	report.Items = append(report.Items, prerequisiteItem{Name: "required-missing", Required: true, OK: false})
+	if report.RequiredOK() {
+		t.Fatal("RequiredOK returned true with a missing required prerequisite")
+	}
+}
+
+func TestPrintPrerequisiteReportIncludesSuggestions(t *testing.T) {
+	report := prerequisiteReport{
+		OS: OSInfo{GOOS: "linux", ID: "debian", Name: "Debian"},
+		Items: []prerequisiteItem{
+			{
+				Name:        "qemu-system-x86_64",
+				Description: "QEMU system emulator.",
+				Required:    true,
+				OK:          false,
+				Detail:      "not found in PATH",
+				Suggestion:  "sudo apt install qemu-system-x86",
+			},
+		},
+	}
+
+	var out bytes.Buffer
+	printPrerequisiteReport(&out, report)
+	output := out.String()
+
+	for _, want := range []string{
+		"[MISSING] qemu-system-x86_64 (required)",
+		"Fix: sudo apt install qemu-system-x86",
+		"Install input prerequisites checked during normal install runs:",
+		"One or more required host prerequisites are missing.",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("prerequisite report missing %q in:\n%s", want, output)
+		}
+	}
+}
+
+func TestPrintUsageMentionsPrerequisitesCommand(t *testing.T) {
+	var out bytes.Buffer
+	printUsage(&out, "install-ubuntu")
+	output := out.String()
+
+	if !strings.Contains(output, "install-ubuntu prerequisites") {
+		t.Fatalf("usage does not mention prerequisites command:\n%s", output)
+	}
+	if !strings.Contains(output, "Aliases: prereqs, prerequests, prequests") {
+		t.Fatalf("usage does not mention prerequisites aliases:\n%s", output)
+	}
 }

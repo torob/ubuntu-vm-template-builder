@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -50,6 +51,28 @@ type Installer struct {
 	diskFmt   string
 	display   string
 	tempDir   string
+}
+
+type OSInfo struct {
+	GOOS      string
+	ID        string
+	Name      string
+	VersionID string
+	IDLike    []string
+}
+
+type prerequisiteItem struct {
+	Name        string
+	Description string
+	Required    bool
+	OK          bool
+	Detail      string
+	Suggestion  string
+}
+
+type prerequisiteReport struct {
+	OS    OSInfo
+	Items []prerequisiteItem
 }
 
 func newInstaller(cfg InstallConfig) (*Installer, error) {
@@ -131,6 +154,287 @@ func checkKVMAccess() error {
 		return fmt.Errorf("close /dev/kvm: %w", err)
 	}
 	return nil
+}
+
+func collectPrerequisites() prerequisiteReport {
+	osInfo := detectOSInfo()
+	installCmd := qemuInstallSuggestion(osInfo)
+
+	items := []prerequisiteItem{
+		{
+			Name:        "Linux host",
+			Description: "Required because this program launches QEMU with KVM through /dev/kvm.",
+			Required:    true,
+			OK:          osInfo.GOOS == "linux",
+			Detail:      osInfo.DisplayName(),
+			Suggestion:  "Run this program on a Linux host with KVM support.",
+		},
+		goPrerequisite(),
+		commandPrerequisite("qemu-system-x86_64", "QEMU system emulator used to boot the Ubuntu installer.", true, installCmd),
+		commandPrerequisite("qemu-img", "QEMU image tool used when creating qcow2 or vmdk images.", false, installCmd),
+		kvmPrerequisite(osInfo),
+	}
+
+	return prerequisiteReport{
+		OS:    osInfo,
+		Items: items,
+	}
+}
+
+func commandPrerequisite(command, description string, required bool, suggestion string) prerequisiteItem {
+	path, err := exec.LookPath(command)
+	item := prerequisiteItem{
+		Name:        command,
+		Description: description,
+		Required:    required,
+		OK:          err == nil,
+		Suggestion:  suggestion,
+	}
+	if err == nil {
+		item.Detail = path
+	} else {
+		item.Detail = "not found in PATH"
+	}
+	return item
+}
+
+func goPrerequisite() prerequisiteItem {
+	path, err := exec.LookPath("go")
+	item := prerequisiteItem{
+		Name:        "Go 1.26 or newer",
+		Description: "Required only when building from source or running with go run.",
+		Required:    false,
+		OK:          err == nil,
+		Suggestion:  "Install Go 1.26 or newer from https://go.dev/dl/ or use a prebuilt install-ubuntu binary.",
+	}
+	if err != nil {
+		item.Detail = "go not found in PATH"
+		return item
+	}
+
+	out, err := exec.Command(path, "version").Output()
+	if err != nil {
+		item.OK = false
+		item.Detail = fmt.Sprintf("%s exists but go version failed: %v", path, err)
+		return item
+	}
+	item.Detail = strings.TrimSpace(string(out))
+	if !goVersionAtLeast(item.Detail, 1, 26) {
+		item.OK = false
+		item.Detail = item.Detail + " (too old)"
+	}
+	return item
+}
+
+func goVersionAtLeast(versionOutput string, wantMajor, wantMinor int) bool {
+	re := regexp.MustCompile(`go([0-9]+)\.([0-9]+)`)
+	m := re.FindStringSubmatch(versionOutput)
+	if m == nil {
+		return false
+	}
+	major, err := strconv.Atoi(m[1])
+	if err != nil {
+		return false
+	}
+	minor, err := strconv.Atoi(m[2])
+	if err != nil {
+		return false
+	}
+	if major != wantMajor {
+		return major > wantMajor
+	}
+	return minor >= wantMinor
+}
+
+func kvmPrerequisite(osInfo OSInfo) prerequisiteItem {
+	err := checkKVMAccess()
+	item := prerequisiteItem{
+		Name:        "/dev/kvm access",
+		Description: "Required for hardware-accelerated QEMU installs.",
+		Required:    true,
+		OK:          err == nil,
+	}
+	if err == nil {
+		item.Detail = "read/write access is available"
+		return item
+	}
+
+	item.Detail = err.Error()
+	if osInfo.GOOS != "linux" {
+		item.Suggestion = "Use a Linux host with KVM support."
+		return item
+	}
+	if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "not found") {
+		item.Suggestion = "Enable virtualization in BIOS/UEFI, load the KVM module with sudo modprobe kvm_intel or sudo modprobe kvm_amd, and install QEMU packages."
+		return item
+	}
+	item.Suggestion = "Grant access with sudo usermod -aG kvm $USER and start a new login shell; for the current session, sudo setfacl -m u:$USER:rw /dev/kvm can be used."
+	return item
+}
+
+func detectOSInfo() OSInfo {
+	info := OSInfo{GOOS: runtime.GOOS}
+	if runtime.GOOS != "linux" {
+		info.Name = runtime.GOOS
+		return info
+	}
+
+	values, err := readOSRelease("/etc/os-release")
+	if err != nil {
+		info.Name = "Linux"
+		return info
+	}
+
+	info.ID = strings.ToLower(values["ID"])
+	info.Name = values["PRETTY_NAME"]
+	if info.Name == "" {
+		info.Name = values["NAME"]
+	}
+	info.VersionID = values["VERSION_ID"]
+	for _, idLike := range strings.Fields(strings.ToLower(values["ID_LIKE"])) {
+		info.IDLike = append(info.IDLike, idLike)
+	}
+	if info.Name == "" {
+		info.Name = "Linux"
+	}
+	return info
+}
+
+func readOSRelease(path string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return parseOSRelease(data), nil
+}
+
+func parseOSRelease(data []byte) map[string]string {
+	values := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			value = unquoted
+		}
+		values[key] = value
+	}
+	return values
+}
+
+func (o OSInfo) DisplayName() string {
+	switch {
+	case o.Name != "" && o.ID != "":
+		return fmt.Sprintf("%s (%s)", o.Name, o.ID)
+	case o.Name != "":
+		return o.Name
+	case o.GOOS != "":
+		return o.GOOS
+	default:
+		return "unknown"
+	}
+}
+
+func (o OSInfo) HasID(ids ...string) bool {
+	for _, id := range ids {
+		id = strings.ToLower(id)
+		if o.ID == id {
+			return true
+		}
+		for _, idLike := range o.IDLike {
+			if idLike == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func qemuInstallSuggestion(osInfo OSInfo) string {
+	if osInfo.GOOS != "linux" {
+		return "Use a Linux host, then install QEMU from that distribution's package manager."
+	}
+	switch {
+	case osInfo.HasID("debian", "ubuntu"):
+		return "sudo apt update && sudo apt install -y qemu-system-x86 qemu-utils"
+	case osInfo.HasID("fedora"):
+		return "sudo dnf install -y qemu-system-x86 qemu-img"
+	case osInfo.HasID("rhel", "centos", "rocky", "almalinux"):
+		return "sudo dnf install -y qemu-kvm qemu-img"
+	case osInfo.HasID("arch"):
+		return "sudo pacman -S qemu-base"
+	case osInfo.HasID("opensuse", "suse"):
+		return "sudo zypper install qemu-x86 qemu-tools"
+	default:
+		return "Install the packages that provide qemu-system-x86_64 and qemu-img for this Linux distribution."
+	}
+}
+
+func (r prerequisiteReport) RequiredOK() bool {
+	for _, item := range r.Items {
+		if item.Required && !item.OK {
+			return false
+		}
+	}
+	return true
+}
+
+func runPrerequisitesCommand(out io.Writer) int {
+	report := collectPrerequisites()
+	printPrerequisiteReport(out, report)
+	if !report.RequiredOK() {
+		return 1
+	}
+	return 0
+}
+
+func printPrerequisiteReport(out io.Writer, report prerequisiteReport) {
+	fmt.Fprintln(out, "Prerequisites")
+	fmt.Fprintf(out, "OS: %s\n\n", report.OS.DisplayName())
+
+	for _, item := range report.Items {
+		status := "OK"
+		if !item.OK && item.Required {
+			status = "MISSING"
+		} else if !item.OK {
+			status = "OPTIONAL MISSING"
+		}
+		required := "required"
+		if !item.Required {
+			required = "optional"
+		}
+
+		fmt.Fprintf(out, "[%s] %s (%s)\n", status, item.Name, required)
+		fmt.Fprintf(out, "  %s\n", item.Description)
+		if item.Detail != "" {
+			fmt.Fprintf(out, "  Detail: %s\n", item.Detail)
+		}
+		if !item.OK && item.Suggestion != "" {
+			fmt.Fprintf(out, "  Fix: %s\n", item.Suggestion)
+		}
+	}
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Install input prerequisites checked during normal install runs:")
+	fmt.Fprintln(out, "- Ubuntu live-server ISO containing /casper/vmlinuz and /casper/initrd")
+	fmt.Fprintln(out, "- cloud-init autoinstall user-data YAML with a top-level autoinstall mapping")
+	fmt.Fprintln(out, "- destination image path that does not already exist")
+	fmt.Fprintln(out, "- writable destination image directory")
+	fmt.Fprintln(out, "- valid disk size such as 20G")
+
+	fmt.Fprintln(out)
+	if report.RequiredOK() {
+		fmt.Fprintln(out, "Required host prerequisites are satisfied.")
+		return
+	}
+	fmt.Fprintln(out, "One or more required host prerequisites are missing.")
 }
 
 func checkISOFile(path string) error {
@@ -585,7 +889,37 @@ func requiredFlagErrors(values map[string]string) []string {
 	return missing
 }
 
+func isPrerequisitesCommand(command string) bool {
+	switch command {
+	case "prerequisites", "prereqs", "prerequests", "prequests":
+		return true
+	default:
+		return false
+	}
+}
+
+func printPrerequisitesUsage(out io.Writer, program string) {
+	fmt.Fprintf(out, "Usage: %s prerequisites\n\n", program)
+	fmt.Fprintln(out, "Aliases: prereqs, prerequests, prequests")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Print host prerequisites, check whether required host tools are available,")
+	fmt.Fprintln(out, "and show OS-specific installation or permission suggestions when something is missing.")
+}
+
 func main() {
+	if len(os.Args) > 1 && isPrerequisitesCommand(os.Args[1]) {
+		if len(os.Args) > 2 {
+			if os.Args[2] == "-h" || os.Args[2] == "--help" {
+				printPrerequisitesUsage(os.Stdout, os.Args[0])
+				os.Exit(0)
+			}
+			fmt.Fprintf(os.Stderr, "Error: %s does not accept arguments\n", os.Args[1])
+			printPrerequisitesUsage(os.Stderr, os.Args[0])
+			os.Exit(1)
+		}
+		os.Exit(runPrerequisitesCommand(os.Stdout))
+	}
+
 	var (
 		isoPath      string
 		imagePath    string
@@ -662,7 +996,13 @@ func main() {
 }
 
 func printUsage(out io.Writer, program string) {
-	fmt.Fprintf(out, "Usage: %s --iso ubuntu.iso --image output.img --disk-size 20G --user-data autoinstall.yaml [--disk-format raw|qcow2|vmdk]\n\n", program)
+	fmt.Fprintf(out, "Usage: %s --iso ubuntu.iso --image output.img --disk-size 20G --user-data autoinstall.yaml [--disk-format raw|qcow2|vmdk]\n", program)
+	fmt.Fprintf(out, "       %s prerequisites\n\n", program)
+	fmt.Fprintln(out, "Commands:")
+	fmt.Fprintln(out, "  prerequisites")
+	fmt.Fprintln(out, "        Print host prerequisites and installation suggestions")
+	fmt.Fprintln(out, "        Aliases: prereqs, prerequests, prequests")
+	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  --iso string")
 	fmt.Fprintln(out, "        Ubuntu ISO file path")

@@ -17,6 +17,16 @@ with `autoinstall ---`.
 
 ## Usage
 
+Check host prerequisites:
+
+```bash
+./install-ubuntu prerequisites
+```
+
+Aliases are `prereqs`, `prerequests`, and `prequests`. The command prints the
+host requirements it checks and suggests OS-specific install or permission fixes
+for missing requirements.
+
 Run an install:
 
 ```bash
