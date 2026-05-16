@@ -60,6 +60,38 @@ Then run:
   --user-data autoinstall.uefi.example.yaml
 ```
 
+Build and run with Docker:
+
+```bash
+docker build -t ubuntu-vm-template-builder .
+```
+
+The image includes the compiled builder, QEMU, `qemu-img`, and OVMF firmware.
+It still needs access to the host KVM device, and input/output paths must be
+mounted into the container. This example mounts the current directory at
+`/work` and writes the output image as your host user:
+
+```bash
+docker run --rm \
+  --device /dev/kvm \
+  --user "$(id -u):$(id -g)" \
+  --group-add "$(stat -c %g /dev/kvm)" \
+  -v "$PWD:/work" \
+  ubuntu-vm-template-builder \
+  --iso /work/ubuntu-24.04.3-live-server-amd64.iso \
+  --image /work/output.img \
+  --disk-size 20G \
+  --boot-mode uefi \
+  --disk-format raw \
+  --user-data /work/autoinstall.uefi.example.yaml
+```
+
+You can also check the container runtime prerequisites:
+
+```bash
+docker run --rm --device /dev/kvm ubuntu-vm-template-builder prerequisites
+```
+
 For a BIOS-installed image, use the BIOS example and select BIOS explicitly:
 
 ```bash
