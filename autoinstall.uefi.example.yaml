@@ -3,9 +3,10 @@ autoinstall:
   version: 1
   identity:
     hostname: ubuntu-server
-    username: sysadmin
+    username: ubuntu
     # Generate a real hash with: openssl passwd -6
-    password: "$6$rounds=4096$examplesalt$8S1wHb9x2TnI.kOfpB7N8VnHnWUZuk5qLXb7ESk6dDXlkd7kgvBL7kFvHEKz8YrxG4PeZRlCuZmLksJrJpY6X/"
+    # password: 1
+    password: "$6$LD9wau6aJBBvttTl$rZP5lqSk1qHf7WYSvMbpVsW/1PRN555qPTt79YEqPDrCDnAg29jUo.P3jXIQWdkuBuoSd4YPRU/Z92Y0Wx0Uv/"
   refresh-installer:
     update: false
   source:

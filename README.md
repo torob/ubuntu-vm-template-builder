@@ -74,6 +74,43 @@ Supported boot modes are `uefi` and `bios`; `uefi` is the default. Use
 installed image. UEFI installs use a temporary OVMF variables file during QEMU
 installation; the disk image is the only persistent output file.
 
+## BIOS and UEFI Booting
+
+BIOS and UEFI find the operating system in different ways.
+
+With BIOS boot, the firmware loads boot code from the disk itself. On a GPT disk,
+GRUB uses a small `bios_grub` partition to store the BIOS bootloader data it
+needs. That makes BIOS images easy to move as a single disk file because the boot
+path is contained on the disk.
+
+With UEFI boot, the firmware loads an `.efi` program from an EFI System
+Partition, usually mounted at `/boot/efi` inside Ubuntu. A normal Ubuntu install
+places bootloader files under a vendor path such as `EFI/ubuntu/` and creates a
+firmware NVRAM boot entry that points to that path. That NVRAM entry is not part
+of the disk image. In QEMU it lives in the OVMF variables file; in Proxmox VE it
+lives in the VM EFI disk; in ESXi it lives in the VM `.nvram` file.
+
+For portable UEFI images, the UEFI example also installs the fallback bootloader
+path:
+
+```text
+EFI/BOOT/BOOTX64.EFI
+```
+
+Fresh UEFI firmware knows to try that fallback path even when it has no saved
+Ubuntu NVRAM boot entry. The UEFI example therefore includes this late command:
+
+```yaml
+late-commands:
+  - curtin in-target --target=/target -- grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu --removable --recheck
+```
+
+`curtin in-target` runs `grub-install` inside the newly installed system under
+`/target`. The important option is `--removable`: it writes the fallback
+`EFI/BOOT/BOOTX64.EFI` path so the disk can boot in a new QEMU, LXD, Proxmox VE,
+or ESXi VM without carrying QEMU's temporary OVMF variables file. This does not
+replace Ubuntu's normal `EFI/ubuntu/` files; it adds a portable fallback.
+
 ## User Data
 
 The `--user-data` file is passed through unchanged into the seed ISO. Put all
