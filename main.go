@@ -9,10 +9,13 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	diskfs "github.com/diskfs/go-diskfs"
 	"github.com/diskfs/go-diskfs/disk"
@@ -23,9 +26,10 @@ import (
 )
 
 const (
-	seedISOSizeBytes int64 = 8 * 1024 * 1024
-	defaultDiskFmt         = "raw"
-	fallbackName           = "ubuntu-autoinstall"
+	seedISOSizeBytes   int64 = 8 * 1024 * 1024
+	defaultDiskFmt           = "raw"
+	fallbackName             = "ubuntu-autoinstall"
+	qemuInterruptGrace       = 5 * time.Second
 )
 
 type InstallConfig struct {
@@ -359,14 +363,85 @@ func (i *Installer) extractBootFiles() (string, string, error) {
 	return kernelPath, initrdPath, nil
 }
 
-func (i *Installer) runQemuInstallation(seedISOPath, kernelPath, initrdPath string) bool {
-	fmt.Println("Starting QEMU installation...")
-	fmt.Println("This may take several minutes. The VM will automatically shut down when installation is complete.")
+func runInterruptibleCommand(cmd *exec.Cmd, signals <-chan os.Signal, grace time.Duration) error {
+	configureCommandProcessGroup(cmd)
 
-	args := []string{
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return waitInterruptibleCommand(cmd, signals, grace)
+}
+
+func configureCommandProcessGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+
+func waitInterruptibleCommand(cmd *exec.Cmd, signals <-chan os.Signal, grace time.Duration) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case sig := <-signals:
+		fmt.Printf("\nInterrupt received; stopping QEMU...\n")
+		if err := signalCommandProcessGroup(cmd, signalToSyscall(sig)); err != nil {
+			return fmt.Errorf("stop QEMU after interrupt: %w", err)
+		}
+
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				return fmt.Errorf("qemu stopped after interrupt: %w", err)
+			}
+			return errors.New("qemu stopped after interrupt")
+		case <-signals:
+			fmt.Println("Second interrupt received; killing QEMU...")
+			if err := signalCommandProcessGroup(cmd, syscall.SIGKILL); err != nil {
+				return fmt.Errorf("kill QEMU after repeated interrupt: %w", err)
+			}
+			return fmt.Errorf("qemu killed after repeated interrupt: %w", <-done)
+		case <-timer.C:
+			fmt.Printf("QEMU did not stop within %s; killing it...\n", grace)
+			if err := signalCommandProcessGroup(cmd, syscall.SIGKILL); err != nil {
+				return fmt.Errorf("kill QEMU after interrupt timeout: %w", err)
+			}
+			return fmt.Errorf("qemu killed after interrupt timeout: %w", <-done)
+		}
+	}
+}
+
+func signalCommandProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
+	if cmd.Process == nil {
+		return nil
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
+
+func signalToSyscall(sig os.Signal) syscall.Signal {
+	if sysSig, ok := sig.(syscall.Signal); ok {
+		return sysSig
+	}
+	return syscall.SIGTERM
+}
+
+func (i *Installer) qemuArgs(seedISOPath, kernelPath, initrdPath string) []string {
+	return []string{
 		"--enable-kvm",
 		"-no-reboot",
 		"-m", "2048",
+		"-display", "none",
 		"-drive", fmt.Sprintf("file=%s,format=%s,cache=none,if=virtio", i.imagePath, i.diskFmt),
 		"-drive", fmt.Sprintf("file=%s,media=cdrom", i.ubuntuISO),
 		"-drive", fmt.Sprintf("file=%s,media=cdrom", seedISOPath),
@@ -374,14 +449,23 @@ func (i *Installer) runQemuInstallation(seedISOPath, kernelPath, initrdPath stri
 		"-initrd", initrdPath,
 		"-append", "autoinstall ---",
 	}
+}
 
-	cmd := exec.Command("qemu-system-x86_64", args...)
+func (i *Installer) runQemuInstallation(seedISOPath, kernelPath, initrdPath string) bool {
+	fmt.Println("Starting QEMU installation...")
+	fmt.Println("This may take several minutes. The VM will automatically shut down when installation is complete.")
+
+	cmd := exec.Command("qemu-system-x86_64", i.qemuArgs(seedISOPath, kernelPath, initrdPath)...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+
+	err := runInterruptibleCommand(cmd, signals, qemuInterruptGrace)
 	if err == nil {
 		fmt.Println("OK installation completed successfully")
 		return true
