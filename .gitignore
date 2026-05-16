@@ -1,0 +1,18 @@
+# Built binaries
+/install-ubuntu
+
+# Downloaded Ubuntu release artifacts
+/*.iso
+/SHA256SUMS
+/SHA256SUMS.gpg
+
+# Generated VM disk images
+/*.img
+/*.qcow2
+/*.vmdk
+/*.raw
+
+# Local editor and OS files
+.DS_Store
+*.swp
+*~
