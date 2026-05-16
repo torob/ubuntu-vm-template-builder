@@ -117,7 +117,7 @@ func TestRunInterruptibleCommandStopsProcessOnInterrupt(t *testing.T) {
 	}
 }
 
-func TestQemuArgsUseHeadlessDisplay(t *testing.T) {
+func TestQemuArgsUseNographicSerialConsole(t *testing.T) {
 	installer := &Installer{
 		ubuntuISO: "ubuntu.iso",
 		imagePath: "output.img",
@@ -125,9 +125,25 @@ func TestQemuArgsUseHeadlessDisplay(t *testing.T) {
 	}
 
 	args := installer.qemuArgs("seed.iso", "vmlinuz", "initrd")
-	if !hasArgPair(args, "-display", "none") {
-		t.Fatalf("qemu args %v do not contain -display none", args)
+	if !hasArg(args, "-nographic") {
+		t.Fatalf("qemu args %v do not contain -nographic", args)
 	}
+	if hasArgPair(args, "-display", "none") {
+		t.Fatalf("qemu args %v still contain -display none", args)
+	}
+	appendValue := valueAfterArg(args, "-append")
+	if !strings.Contains(appendValue, "console=ttyS0,115200n8") {
+		t.Fatalf("qemu -append value %q does not enable ttyS0 console", appendValue)
+	}
+}
+
+func hasArg(args []string, name string) bool {
+	for _, arg := range args {
+		if arg == name {
+			return true
+		}
+	}
+	return false
 }
 
 func hasArgPair(args []string, name, value string) bool {
@@ -137,4 +153,13 @@ func hasArgPair(args []string, name, value string) bool {
 		}
 	}
 	return false
+}
+
+func valueAfterArg(args []string, name string) string {
+	for idx := 0; idx+1 < len(args); idx++ {
+		if args[idx] == name {
+			return args[idx+1]
+		}
+	}
+	return ""
 }

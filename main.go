@@ -441,13 +441,13 @@ func (i *Installer) qemuArgs(seedISOPath, kernelPath, initrdPath string) []strin
 		"--enable-kvm",
 		"-no-reboot",
 		"-m", "2048",
-		"-display", "none",
+		"-nographic",
 		"-drive", fmt.Sprintf("file=%s,format=%s,cache=none,if=virtio", i.imagePath, i.diskFmt),
 		"-drive", fmt.Sprintf("file=%s,media=cdrom", i.ubuntuISO),
 		"-drive", fmt.Sprintf("file=%s,media=cdrom", seedISOPath),
 		"-kernel", kernelPath,
 		"-initrd", initrdPath,
-		"-append", "autoinstall ---",
+		"-append", "autoinstall console=ttyS0,115200n8 ---",
 	}
 }
 
@@ -456,10 +456,8 @@ func (i *Installer) runQemuInstallation(seedISOPath, kernelPath, initrdPath stri
 	fmt.Println("This may take several minutes. The VM will automatically shut down when installation is complete.")
 
 	cmd := exec.Command("qemu-system-x86_64", i.qemuArgs(seedISOPath, kernelPath, initrdPath)...)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
@@ -472,9 +470,6 @@ func (i *Installer) runQemuInstallation(seedISOPath, kernelPath, initrdPath stri
 	}
 
 	fmt.Printf("Installation failed: %v\n", err)
-	if stderr.Len() > 0 {
-		fmt.Printf("Error output: %s\n", strings.TrimSpace(stderr.String()))
-	}
 	return false
 }
 
