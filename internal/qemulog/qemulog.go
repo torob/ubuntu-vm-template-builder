@@ -67,6 +67,7 @@ func (w *CompactingWriter) emitBufferedLine() error {
 }
 
 func (w *CompactingWriter) emitLine(line []byte) error {
+	line = sanitizeLine(line)
 	if !hasVisibleContent(line) {
 		if w.blank {
 			return nil
@@ -87,18 +88,32 @@ func (w *CompactingWriter) emitLine(line []byte) error {
 }
 
 func hasVisibleContent(line []byte) bool {
-	for idx := 0; idx < len(line); {
-		b := line[idx]
+	for _, b := range line {
 		switch {
-		case b == 0x1b:
-			idx = skipEscape(line, idx)
 		case b <= ' ' || b == 0x7f:
-			idx++
+			continue
 		default:
 			return true
 		}
 	}
 	return false
+}
+
+func sanitizeLine(line []byte) []byte {
+	sanitized := make([]byte, 0, len(line))
+	for idx := 0; idx < len(line); {
+		b := line[idx]
+		switch {
+		case b == 0x1b:
+			idx = skipEscape(line, idx)
+		case b == '\t' || (b >= ' ' && b != 0x7f):
+			sanitized = append(sanitized, b)
+			idx++
+		default:
+			idx++
+		}
+	}
+	return sanitized
 }
 
 func skipEscape(line []byte, idx int) int {
@@ -111,6 +126,11 @@ func skipEscape(line []byte, idx int) int {
 		return skipCSI(line, idx+2)
 	case ']':
 		return skipOSC(line, idx+2)
+	case '(', ')', '*', '+', '-', '.', '/', '#', '%':
+		if idx+2 < len(line) {
+			return idx + 3
+		}
+		return len(line)
 	default:
 		return idx + 2
 	}
