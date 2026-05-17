@@ -279,6 +279,9 @@ func TestQemuArgsUseNographicSerialConsole(t *testing.T) {
 	if !hasArg(args, "-nographic") {
 		t.Fatalf("qemu args %v do not contain -nographic", args)
 	}
+	if !hasArgPair(args, "-cpu", "host") {
+		t.Fatalf("qemu args %v do not use host CPU model", args)
+	}
 	if hasArg(args, "if=pflash,format=raw,readonly=on,file=OVMF_CODE.fd") {
 		t.Fatalf("bios qemu args %v unexpectedly contain OVMF pflash", args)
 	}

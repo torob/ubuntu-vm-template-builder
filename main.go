@@ -24,6 +24,8 @@ import (
 	"github.com/diskfs/go-diskfs/filesystem/iso9660"
 	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
+
+	"ubuntu-vm-template-builder/internal/qemulog"
 )
 
 const (
@@ -1043,6 +1045,7 @@ func signalToSyscall(sig os.Signal) syscall.Signal {
 func (i *Installer) qemuArgs(seedISOPath, kernelPath, initrdPath string) ([]string, error) {
 	args := []string{
 		"--enable-kvm",
+		"-cpu", "host",
 		"-no-reboot",
 		"-m", "2048",
 		"-nographic",
@@ -1090,14 +1093,22 @@ func (i *Installer) runQemuInstallation(seedISOPath, kernelPath, initrdPath stri
 	}
 
 	cmd := exec.Command("qemu-system-x86_64", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	stdoutLog := qemulog.NewCompactingWriter(os.Stdout)
+	stderrLog := qemulog.NewCompactingWriter(os.Stderr)
+	cmd.Stdout = stdoutLog
+	cmd.Stderr = stderrLog
 
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
 	err = runInterruptibleCommand(cmd, signals, qemuInterruptGrace)
+	if flushErr := stdoutLog.Flush(); flushErr != nil && err == nil {
+		err = flushErr
+	}
+	if flushErr := stderrLog.Flush(); flushErr != nil && err == nil {
+		err = flushErr
+	}
 	if err == nil {
 		fmt.Println("OK installation completed successfully")
 		return true

@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"ubuntu-vm-template-builder/internal/qemulog"
 )
 
 const (
@@ -905,8 +907,9 @@ func (r matrixRunner) verifyBoot(ctx context.Context, caseDir, imagePath, keyPat
 		return err
 	}
 	cmd := exec.Command("qemu-system-x86_64", args...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	logWriter := qemulog.NewCompactingWriter(logFile)
+	cmd.Stdout = logWriter
+	cmd.Stderr = logWriter
 	configureCommandProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
@@ -916,7 +919,10 @@ func (r matrixRunner) verifyBoot(ctx context.Context, caseDir, imagePath, keyPat
 	go func() {
 		done <- cmd.Wait()
 	}()
-	defer stopCommand(cmd, done)
+	defer func() {
+		stopCommand(cmd, done)
+		_ = logWriter.Flush()
+	}()
 
 	if err := waitForSSH(ctx, keyPath, port); err != nil {
 		return fmt.Errorf("%w; see %s", err, logPath)
@@ -974,6 +980,7 @@ func (r matrixRunner) verifyBoot(ctx context.Context, caseDir, imagePath, keyPat
 func bootQEMUArgs(caseDir, imagePath, diskFormat, bootMode string, sshPort int) ([]string, error) {
 	args := []string{
 		"--enable-kvm",
+		"-cpu", "host",
 		"-no-reboot",
 		"-m", "2048",
 		"-nographic",

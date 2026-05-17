@@ -211,3 +211,22 @@ func TestShellQuote(t *testing.T) {
 		t.Fatalf("shellQuote = %q, want %q", got, want)
 	}
 }
+
+func TestBootQEMUArgsUseHostCPU(t *testing.T) {
+	args, err := bootQEMUArgs(t.TempDir(), "image.raw", diskFormatRaw, bootModeBIOS, 2222)
+	if err != nil {
+		t.Fatalf("bootQEMUArgs returned error: %v", err)
+	}
+	if !hasArgPair(args, "-cpu", "host") {
+		t.Fatalf("boot qemu args %v do not use host CPU model", args)
+	}
+}
+
+func hasArgPair(args []string, name, value string) bool {
+	for idx := 0; idx+1 < len(args); idx++ {
+		if args[idx] == name && args[idx+1] == value {
+			return true
+		}
+	}
+	return false
+}
