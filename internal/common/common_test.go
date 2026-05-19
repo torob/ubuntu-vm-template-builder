@@ -241,7 +241,7 @@ func TestLoadHardwareConfigDefaults(t *testing.T) {
 	if cfg.QEMU.CPUModel != "host" || cfg.QEMU.DiskInterface != "virtio" || cfg.QEMU.ISOInterface != "virtio" {
 		t.Fatalf("default qemu hardware config = %+v", cfg.QEMU)
 	}
-	if cfg.VCenter.SCSIController != "pvscsi" || cfg.VCenter.NetworkAdapter != "vmxnet3" || cfg.VCenter.Network != "" || cfg.VCenter.DiskProvisioning != VCenterDiskProvisioningThickLazyZeroed || cfg.VCenter.ReserveAllGuestMemory || cfg.VCenter.OutputType != VCenterOutputTypeTemplate {
+	if cfg.VCenter.SCSIController != "pvscsi" || cfg.VCenter.NetworkAdapter != "vmxnet3" || cfg.VCenter.Network != "" || cfg.VCenter.DiskProvisioning != VCenterDiskProvisioningThickLazyZeroed || cfg.VCenter.Compatibility != "" || cfg.VCenter.GuestOSID != DefaultVCenterGuestOSID || cfg.VCenter.ReserveAllGuestMemory || cfg.VCenter.OutputType != VCenterOutputTypeTemplate {
 		t.Fatalf("default vcenter hardware config = %+v", cfg.VCenter)
 	}
 }
@@ -263,6 +263,8 @@ vcenter:
   network_adapter: E1000E
   network: " VM Network "
   disk_provisioning: Thick Provision Eager Zeroed
+  compatibility: VMX-21
+  guest_os_id: " otherLinux64Guest "
   reserve_all_guest_memory: true
   output_type: VM
 `)
@@ -280,7 +282,7 @@ vcenter:
 	if cfg.QEMU.CPUModel != "max" || cfg.QEMU.DiskInterface != "scsi" || cfg.QEMU.ISOInterface != "sata" {
 		t.Fatalf("custom qemu hardware config = %+v", cfg.QEMU)
 	}
-	if cfg.VCenter.SCSIController != "lsilogic-sas" || cfg.VCenter.NetworkAdapter != "e1000e" || cfg.VCenter.Network != "VM Network" || cfg.VCenter.DiskProvisioning != VCenterDiskProvisioningThickEagerZeroed || !cfg.VCenter.ReserveAllGuestMemory || cfg.VCenter.OutputType != VCenterOutputTypeVM {
+	if cfg.VCenter.SCSIController != "lsilogic-sas" || cfg.VCenter.NetworkAdapter != "e1000e" || cfg.VCenter.Network != "VM Network" || cfg.VCenter.DiskProvisioning != VCenterDiskProvisioningThickEagerZeroed || cfg.VCenter.Compatibility != "vmx-21" || cfg.VCenter.GuestOSID != "otherLinux64Guest" || !cfg.VCenter.ReserveAllGuestMemory || cfg.VCenter.OutputType != VCenterOutputTypeVM {
 		t.Fatalf("custom vcenter hardware config = %+v", cfg.VCenter)
 	}
 }
@@ -324,7 +326,7 @@ func TestLoadHardwareConfigPartialKeepsDefaults(t *testing.T) {
 	if cfg.QEMU.CPUModel != "host" || cfg.QEMU.DiskInterface != "virtio" || cfg.QEMU.ISOInterface != "virtio" {
 		t.Fatalf("partial config did not keep qemu defaults: %+v", cfg.QEMU)
 	}
-	if cfg.VCenter.SCSIController != "pvscsi" || cfg.VCenter.NetworkAdapter != "vmxnet3" || cfg.VCenter.Network != "" || cfg.VCenter.DiskProvisioning != VCenterDiskProvisioningThickLazyZeroed || cfg.VCenter.ReserveAllGuestMemory || cfg.VCenter.OutputType != VCenterOutputTypeTemplate {
+	if cfg.VCenter.SCSIController != "pvscsi" || cfg.VCenter.NetworkAdapter != "vmxnet3" || cfg.VCenter.Network != "" || cfg.VCenter.DiskProvisioning != VCenterDiskProvisioningThickLazyZeroed || cfg.VCenter.Compatibility != "" || cfg.VCenter.GuestOSID != DefaultVCenterGuestOSID || cfg.VCenter.ReserveAllGuestMemory || cfg.VCenter.OutputType != VCenterOutputTypeTemplate {
 		t.Fatalf("partial config did not keep vcenter defaults: %+v", cfg.VCenter)
 	}
 }
@@ -376,6 +378,18 @@ func TestHardwareConfigValidationRejectsInvalidValues(t *testing.T) {
 	cfg.VCenter.DiskProvisioning = "two_growable"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate returned nil error for invalid vCenter disk provisioning")
+	}
+
+	cfg = validHardwareConfig()
+	cfg.VCenter.Compatibility = "vmx-latest"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate returned nil error for invalid vCenter compatibility")
+	}
+
+	cfg = validHardwareConfig()
+	cfg.VCenter.GuestOSID = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate returned nil error for empty vCenter guest OS ID")
 	}
 
 	cfg = validHardwareConfig()

@@ -138,6 +138,8 @@ vcenter:
   network_adapter: vmxnet3
   network: VM Network
   disk_provisioning: thick_provision_lazy_zeroed
+  compatibility: ""
+  guest_os_id: ubuntu64Guest
   reserve_all_guest_memory: false
   output_type: template
 ```
@@ -149,10 +151,82 @@ Print a complete backend-specific example:
 ./ubuntu-vm-template-builder vcenter hardware-config-example > hardware.vcenter.yaml
 ```
 
-Common keys are `boot_firmware`, `disk_size`, `vcpu`, and `memory_mb`.
-Backend-specific keys live under `qemu` and `vcenter`. Supported boot firmware
-values are `uefi` and `bios`; UEFI is the default. Use `boot_firmware: bios` if
-the host does not have OVMF installed or you need a BIOS-installed image.
+Common hardware config options:
+
+| Option | Required | Default | Description |
+| --- | --- | --- | --- |
+| `boot_firmware` | No | `uefi` | Guest firmware. Supported values are `uefi` and `bios`. |
+| `disk_size` | Yes | none | Guest disk size, such as `20G`, `51200M`, or `1T`. |
+| `vcpu` | No | `2` | Number of virtual CPUs. |
+| `memory_mb` | No | `2048` | Guest memory in MiB. |
+
+QEMU hardware config options:
+
+| Option | Required | Default | Description |
+| --- | --- | --- | --- |
+| `qemu.cpu_model` | No | `host` | CPU model passed to QEMU. |
+| `qemu.disk_interface` | No | `virtio` | Disk interface. Supported values are `virtio`, `ide`, `scsi`, and `sata`. |
+| `qemu.iso_interface` | No | `virtio` | Installer ISO interface. Supported values are `virtio`, `ide`, `scsi`, and `sata`. |
+
+vCenter hardware config options:
+
+| Option | Required | Default | Description |
+| --- | --- | --- | --- |
+| `vcenter.scsi_controller` | No | `pvscsi` | Disk controller type. Supported values are `pvscsi`, `lsilogic`, `buslogic`, and `lsilogic-sas`. |
+| `vcenter.network_adapter` | No | `vmxnet3` | NIC type. Supported values are `vmxnet3`, `vmxnet2`, `vmxnet`, `e1000`, and `e1000e`. |
+| `vcenter.network` | Yes, unless `--vcenter-network` is set | none | vCenter network name or inventory path. The CLI flag overrides this value. |
+| `vcenter.disk_provisioning` | No | `thick_provision_lazy_zeroed` | Disk provisioning. Supported values are `thin`, `thick_provision_lazy_zeroed`, and `thick_provision_eager_zeroed`. |
+| `vcenter.compatibility` | No | vCenter default | VM hardware compatibility/version, such as `vmx-21`. Leave empty to let vCenter choose. |
+| `vcenter.guest_os_id` | No | `ubuntu64Guest` | vSphere Guest OS identifier, such as `ubuntu64Guest`. Use the API identifier, not the human-readable UI label. |
+| `vcenter.reserve_all_guest_memory` | No | `false` | Reserves all configured guest memory in vCenter. |
+| `vcenter.output_type` | No | `template` | Final output type. Supported values are `template` and `vm`. |
+
+`vcenter.compatibility` accepts the vSphere VM hardware version string, not the
+human-readable UI label. Leave it empty to use the vCenter/ESXi default. The
+builder validates the format as `vmx-N`; vCenter validates whether that version
+is supported by the selected ESXi host.
+
+Common compatibility values:
+
+| Value | Notes |
+| --- | --- |
+| `""` | Do not set VM hardware version; let vCenter choose. |
+| `vmx-19` | Example hardware version supported by recent vSphere 7.x environments. |
+| `vmx-20` | Example hardware version supported by vSphere 8.x environments. |
+| `vmx-21` | Example hardware version supported by newer vSphere 8.x environments. |
+
+Use the exact value shown by your vCenter compatibility option or API. If an
+older ESXi host rejects the value, leave it empty or choose a lower `vmx-N`
+version supported by that host.
+
+`vcenter.guest_os_id` accepts the vSphere Guest OS API identifier. It is not the
+human-readable UI label. For Ubuntu templates, the default `ubuntu64Guest` is
+usually the right value.
+
+Common guest OS IDs:
+
+| Value | Guest OS selection |
+| --- | --- |
+| `ubuntu64Guest` | Ubuntu Linux 64-bit. |
+| `ubuntuGuest` | Ubuntu Linux 32-bit. |
+| `debian12_64Guest` | Debian GNU/Linux 12 64-bit. |
+| `debian11_64Guest` | Debian GNU/Linux 11 64-bit. |
+| `rhel9_64Guest` | Red Hat Enterprise Linux 9 64-bit. |
+| `rhel8_64Guest` | Red Hat Enterprise Linux 8 64-bit. |
+| `centos9_64Guest` | CentOS 9 64-bit. |
+| `sles15_64Guest` | SUSE Linux Enterprise Server 15 64-bit. |
+| `opensuse64Guest` | openSUSE 64-bit. |
+| `fedora64Guest` | Fedora Linux 64-bit. |
+| `vmwarePhoton64Guest` | VMware Photon OS 64-bit. |
+| `genericLinuxGuest` | Generic Linux. |
+| `otherLinux64Guest` | Other Linux 64-bit. |
+
+The full set of guest OS IDs depends on the vSphere API version exposed by your
+vCenter/ESXi environment. Use an ID your vCenter supports; otherwise CreateVM
+will fail validation.
+
+Use `boot_firmware: bios` if the host does not have OVMF installed or you need a
+BIOS-installed image.
 
 For vCenter, the target network can be set as `vcenter.network` in the hardware
 config or with `--vcenter-network`; the CLI flag overrides the config value.

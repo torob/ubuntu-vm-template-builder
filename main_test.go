@@ -118,6 +118,8 @@ func TestHardwareConfigExampleCommands(t *testing.T) {
 				"network_adapter: vmxnet3",
 				"network: VM Network",
 				"disk_provisioning: thick_provision_lazy_zeroed",
+				"compatibility: \"\"",
+				"guest_os_id: ubuntu64Guest",
 				"reserve_all_guest_memory: false",
 				"output_type: template",
 			},

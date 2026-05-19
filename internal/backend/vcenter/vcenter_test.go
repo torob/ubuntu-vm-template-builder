@@ -522,6 +522,8 @@ func TestVMConfigUsesRequestedHardware(t *testing.T) {
 	runVPXSimulator(t, func(ctx context.Context, client *vim25.Client) {
 		cfg := simulatorVCenterConfig("config-template")
 		cfg.Hardware.VCenter.ReserveAllGuestMemory = true
+		cfg.Hardware.VCenter.Compatibility = "vmx-21"
+		cfg.Hardware.VCenter.GuestOSID = "otherLinux64Guest"
 
 		placement, err := ResolvePlacement(ctx, client, cfg.VCenter)
 		if err != nil {
@@ -537,6 +539,12 @@ func TestVMConfigUsesRequestedHardware(t *testing.T) {
 
 		if spec.Firmware != string(types.GuestOsDescriptorFirmwareTypeEfi) {
 			t.Fatalf("Firmware = %q, want efi", spec.Firmware)
+		}
+		if spec.Version != "vmx-21" {
+			t.Fatalf("Version = %q, want vmx-21", spec.Version)
+		}
+		if spec.GuestId != "otherLinux64Guest" {
+			t.Fatalf("GuestId = %q, want otherLinux64Guest", spec.GuestId)
 		}
 		if spec.NumCPUs != 4 || spec.MemoryMB != 8192 {
 			t.Fatalf("CPU/memory = %d/%d, want 4/8192", spec.NumCPUs, spec.MemoryMB)
@@ -605,6 +613,27 @@ func TestVMConfigUsesRequestedHardware(t *testing.T) {
 		}
 		if placement.Folder.Reference() != folders.VmFolder.Reference() {
 			t.Fatalf("folder ref = %s, want VM folder %s", placement.Folder.Reference(), folders.VmFolder.Reference())
+		}
+	})
+}
+
+func TestVMConfigDefaultsGuestOSAndCompatibility(t *testing.T) {
+	runVPXSimulator(t, func(ctx context.Context, client *vim25.Client) {
+		cfg := simulatorVCenterConfig("config-defaults")
+		placement, err := ResolvePlacement(ctx, client, cfg.VCenter)
+		if err != nil {
+			t.Fatalf("ResolvePlacement returned error: %v", err)
+		}
+
+		spec, err := BuildVMConfig(ctx, cfg, placement, placement.Datastore.Path("installer.iso"), placement.Datastore.Path("installer-console.log"), 20*1024*1024*1024)
+		if err != nil {
+			t.Fatalf("BuildVMConfig returned error: %v", err)
+		}
+		if spec.GuestId != common.DefaultVCenterGuestOSID {
+			t.Fatalf("GuestId = %q, want %q", spec.GuestId, common.DefaultVCenterGuestOSID)
+		}
+		if spec.Version != "" {
+			t.Fatalf("Version = %q, want empty vCenter default", spec.Version)
 		}
 	})
 }

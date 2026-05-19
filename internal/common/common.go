@@ -23,6 +23,8 @@ const (
 	BootFirmwareBIOS    = "bios"
 	FallbackName        = "ubuntu-vm-template-builder"
 
+	DefaultVCenterGuestOSID = "ubuntu64Guest"
+
 	VCenterDiskProvisioningThin             = "thin"
 	VCenterDiskProvisioningThickLazyZeroed  = "thick_provision_lazy_zeroed"
 	VCenterDiskProvisioningThickEagerZeroed = "thick_provision_eager_zeroed"
@@ -51,6 +53,8 @@ type VCenterHardwareConfig struct {
 	NetworkAdapter        string `yaml:"network_adapter"`
 	Network               string `yaml:"network"`
 	DiskProvisioning      string `yaml:"disk_provisioning"`
+	Compatibility         string `yaml:"compatibility"`
+	GuestOSID             string `yaml:"guest_os_id"`
 	ReserveAllGuestMemory bool   `yaml:"reserve_all_guest_memory"`
 	OutputType            string `yaml:"output_type"`
 }
@@ -69,6 +73,7 @@ func DefaultHardwareConfig() HardwareConfig {
 			SCSIController:   "pvscsi",
 			NetworkAdapter:   "vmxnet3",
 			DiskProvisioning: VCenterDiskProvisioningThickLazyZeroed,
+			GuestOSID:        DefaultVCenterGuestOSID,
 			OutputType:       VCenterOutputTypeTemplate,
 		},
 	}
@@ -110,6 +115,8 @@ func (c HardwareConfig) Normalize() HardwareConfig {
 	c.VCenter.NetworkAdapter = strings.ToLower(strings.TrimSpace(c.VCenter.NetworkAdapter))
 	c.VCenter.Network = strings.TrimSpace(c.VCenter.Network)
 	c.VCenter.DiskProvisioning = normalizeVCenterDiskProvisioning(c.VCenter.DiskProvisioning)
+	c.VCenter.Compatibility = strings.ToLower(strings.TrimSpace(c.VCenter.Compatibility))
+	c.VCenter.GuestOSID = strings.TrimSpace(c.VCenter.GuestOSID)
 	c.VCenter.OutputType = NormalizeVCenterOutputType(c.VCenter.OutputType)
 	return c
 }
@@ -148,6 +155,12 @@ func (c HardwareConfig) Validate() error {
 	}
 	if !isOneOf(c.VCenter.DiskProvisioning, VCenterDiskProvisioningThin, VCenterDiskProvisioningThickLazyZeroed, VCenterDiskProvisioningThickEagerZeroed) {
 		return errors.New("vcenter.disk_provisioning must be one of thin, thick_provision_lazy_zeroed, thick_provision_eager_zeroed")
+	}
+	if strings.TrimSpace(c.VCenter.Compatibility) != "" && !regexp.MustCompile(`^vmx-[0-9]+$`).MatchString(c.VCenter.Compatibility) {
+		return errors.New("vcenter.compatibility must use vSphere hardware version format such as vmx-21")
+	}
+	if strings.TrimSpace(c.VCenter.GuestOSID) == "" {
+		return errors.New("vcenter.guest_os_id must not be empty")
 	}
 	if !isOneOf(c.VCenter.OutputType, VCenterOutputTypeTemplate, VCenterOutputTypeVM) {
 		return errors.New("vcenter.output_type must be template or vm")

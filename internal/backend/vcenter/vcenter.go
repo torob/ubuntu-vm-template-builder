@@ -809,8 +809,10 @@ func printCreateVMRequestDetails(ctx context.Context, cfg Config, placement *pla
 	fmt.Printf("  Network: %s\n", objectTargetString(cfg.VCenter.Network, placement.Network.GetInventoryPath(), placement.Network.Reference()))
 	fmt.Printf("  Installer ISO: %s\n", datastoreISOPath)
 	fmt.Printf("  Console log: %s\n", datastoreConsoleLogPath)
-	fmt.Printf("  Hardware: firmware=%s vcpu=%d memory_mb=%d disk_size=%s disk_bytes=%d scsi=%s nic=%s disk_provisioning=%s reserve_all_guest_memory=%t\n",
+	fmt.Printf("  Hardware: firmware=%s compatibility=%s guest_os_id=%s vcpu=%d memory_mb=%d disk_size=%s disk_bytes=%d scsi=%s nic=%s disk_provisioning=%s reserve_all_guest_memory=%t\n",
 		hardware.BootFirmware,
+		emptyAsDefault(hardware.VCenter.Compatibility, "vCenter default"),
+		hardware.VCenter.GuestOSID,
 		hardware.VCPU,
 		hardware.MemoryMB,
 		hardware.DiskSize,
@@ -950,6 +952,13 @@ func objectTargetString(inputName, inventoryPath string, ref types.ManagedObject
 	}
 }
 
+func emptyAsDefault(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
 func refString(ref types.ManagedObjectReference) string {
 	return fmt.Sprintf("%s:%s", ref.Type, ref.Value)
 }
@@ -1042,7 +1051,7 @@ func BuildVMConfig(ctx context.Context, cfg Config, placement *placement, datast
 
 	spec := types.VirtualMachineConfigSpec{
 		Name:     vcenter.Name,
-		GuestId:  string(types.VirtualMachineGuestOsIdentifierUbuntu64Guest),
+		GuestId:  hardware.VCenter.GuestOSID,
 		NumCPUs:  int32(hardware.VCPU),
 		MemoryMB: int64(hardware.MemoryMB),
 		Firmware: firmware,
@@ -1056,6 +1065,9 @@ func BuildVMConfig(ctx context.Context, cfg Config, placement *placement, datast
 			},
 		},
 		DeviceChange: deviceChange,
+	}
+	if hardware.VCenter.Compatibility != "" {
+		spec.Version = hardware.VCenter.Compatibility
 	}
 	if hardware.VCenter.ReserveAllGuestMemory {
 		spec.MemoryReservationLockedToMax = types.NewBool(true)
