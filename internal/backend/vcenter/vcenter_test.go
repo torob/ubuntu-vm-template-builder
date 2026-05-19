@@ -492,7 +492,7 @@ func TestVMConfigUsesRequestedHardware(t *testing.T) {
 	})
 }
 
-func TestBuildPostInstallDeviceSpecDisconnectsInstallerDevicesAndBootsDiskOnly(t *testing.T) {
+func TestBuildPostInstallDeviceSpecRemovesInstallerDevicesAndBootsDiskOnly(t *testing.T) {
 	runVPXSimulator(t, func(ctx context.Context, client *vim25.Client) {
 		cfg := simulatorVCenterConfig("post-install-spec")
 		placement, err := ResolvePlacement(ctx, client, cfg.VCenter)
@@ -515,20 +515,17 @@ func TestBuildPostInstallDeviceSpecDisconnectsInstallerDevicesAndBootsDiskOnly(t
 		}
 
 		assertDiskOnlyBootOrder(t, finalSpec.BootOptions, disk.Key)
-		cdrom, ok := findDeviceChange[*types.VirtualCdrom](finalSpec)
+		_, cdromChange, ok := findDeviceConfigChange[*types.VirtualCdrom](finalSpec)
 		if !ok {
-			t.Fatalf("post-install spec missing CDROM edit: %#v", finalSpec.DeviceChange)
+			t.Fatalf("post-install spec missing CDROM remove: %#v", finalSpec.DeviceChange)
 		}
-		if _, ok := cdrom.Backing.(*types.VirtualCdromIsoBackingInfo); ok {
-			t.Fatalf("CDROM still has ISO backing: %#v", cdrom.Backing)
-		}
-		assertDeviceDisconnected(t, cdrom.GetVirtualDevice(), "CDROM")
+		assertDeviceRemoveOperation(t, cdromChange, "CDROM")
 
-		serial, ok := findDeviceChange[*types.VirtualSerialPort](finalSpec)
+		_, serialChange, ok := findDeviceConfigChange[*types.VirtualSerialPort](finalSpec)
 		if !ok {
-			t.Fatalf("post-install spec missing serial edit: %#v", finalSpec.DeviceChange)
+			t.Fatalf("post-install spec missing serial remove: %#v", finalSpec.DeviceChange)
 		}
-		assertDeviceDisconnected(t, serial.GetVirtualDevice(), "serial")
+		assertDeviceRemoveOperation(t, serialChange, "serial")
 	})
 }
 
@@ -556,16 +553,11 @@ func TestFinalizePostInstallDevicesInSimulator(t *testing.T) {
 		if disk == nil {
 			t.Fatal("finalized VM missing disk")
 		}
-		for _, device := range devices.SelectByType((*types.VirtualCdrom)(nil)) {
-			cdrom := device.(*types.VirtualCdrom)
-			if _, ok := cdrom.Backing.(*types.VirtualCdromIsoBackingInfo); ok {
-				t.Fatalf("finalized CDROM still has ISO backing: %#v", cdrom.Backing)
-			}
-			assertDeviceDisconnected(t, cdrom.GetVirtualDevice(), "CDROM")
+		if count := len(devices.SelectByType((*types.VirtualCdrom)(nil))); count != 0 {
+			t.Fatalf("finalized VM has %d CDROM device(s), want 0", count)
 		}
-		for _, device := range devices.SelectByType((*types.VirtualSerialPort)(nil)) {
-			serial := device.(*types.VirtualSerialPort)
-			assertDeviceDisconnected(t, serial.GetVirtualDevice(), "serial")
+		if count := len(devices.SelectByType((*types.VirtualSerialPort)(nil))); count != 0 {
+			t.Fatalf("finalized VM has %d serial port(s), want 0", count)
 		}
 
 		var vmMO mo.VirtualMachine
@@ -826,16 +818,14 @@ func devicesFromConfigSpec(t *testing.T, spec types.VirtualMachineConfigSpec) ob
 	return devices
 }
 
-func assertDeviceDisconnected(t *testing.T, device *types.VirtualDevice, label string) {
+func assertDeviceRemoveOperation(t *testing.T, change types.BaseVirtualDeviceConfigSpec, label string) {
 	t.Helper()
-	if device.Connectable == nil {
-		t.Fatalf("%s connectable is nil, want disconnected flags", label)
+	spec := change.GetVirtualDeviceConfigSpec()
+	if spec.Operation != types.VirtualDeviceConfigSpecOperationRemove {
+		t.Fatalf("%s operation = %s, want remove", label, spec.Operation)
 	}
-	if device.Connectable.Connected {
-		t.Fatalf("%s Connected = true, want false", label)
-	}
-	if device.Connectable.StartConnected {
-		t.Fatalf("%s StartConnected = true, want false", label)
+	if spec.FileOperation != "" {
+		t.Fatalf("%s file operation = %s, want empty", label, spec.FileOperation)
 	}
 }
 
@@ -875,4 +865,15 @@ func findDeviceChange[T types.BaseVirtualDevice](spec types.VirtualMachineConfig
 		}
 	}
 	return zero, false
+}
+
+func findDeviceConfigChange[T types.BaseVirtualDevice](spec types.VirtualMachineConfigSpec) (T, types.BaseVirtualDeviceConfigSpec, bool) {
+	var zero T
+	for _, change := range spec.DeviceChange {
+		device := change.GetVirtualDeviceConfigSpec().Device
+		if typed, ok := device.(T); ok {
+			return typed, change, true
+		}
+	}
+	return zero, nil, false
 }

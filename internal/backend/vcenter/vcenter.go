@@ -903,6 +903,8 @@ func finalizePostInstallDevices(ctx context.Context, vm *object.VirtualMachine) 
 	if err != nil {
 		return fmt.Errorf("read VM devices: %w", err)
 	}
+	cdromCount := len(devices.SelectByType((*types.VirtualCdrom)(nil)))
+	serialCount := len(devices.SelectByType((*types.VirtualSerialPort)(nil)))
 	spec, err := buildPostInstallDeviceSpec(devices)
 	if err != nil {
 		return err
@@ -914,7 +916,10 @@ func finalizePostInstallDevices(ctx context.Context, vm *object.VirtualMachine) 
 	if err := task.Wait(ctx); err != nil {
 		return fmt.Errorf("wait for post-install device finalization: %w", err)
 	}
-	fmt.Println("OK post-install VM devices finalized")
+	if err := verifyPostInstallDevices(ctx, vm); err != nil {
+		return err
+	}
+	fmt.Printf("OK post-install VM devices finalized (removed %d CD/DVD drive(s), %d serial port(s); boot order is disk-only)\n", cdromCount, serialCount)
 	return nil
 }
 
@@ -924,20 +929,15 @@ func buildPostInstallDeviceSpec(devices object.VirtualDeviceList) (types.Virtual
 		return types.VirtualMachineConfigSpec{}, errors.New("no virtual disk found for final boot order")
 	}
 
-	var editedDevices object.VirtualDeviceList
+	var removedDevices object.VirtualDeviceList
 	for _, device := range devices.SelectByType((*types.VirtualCdrom)(nil)) {
-		cdrom := device.(*types.VirtualCdrom)
-		devices.EjectIso(cdrom)
-		disconnectDevice(cdrom.GetVirtualDevice())
-		editedDevices = append(editedDevices, cdrom)
+		removedDevices = append(removedDevices, device)
 	}
 	for _, device := range devices.SelectByType((*types.VirtualSerialPort)(nil)) {
-		serial := device.(*types.VirtualSerialPort)
-		disconnectDevice(serial.GetVirtualDevice())
-		editedDevices = append(editedDevices, serial)
+		removedDevices = append(removedDevices, device)
 	}
 
-	deviceChange, err := editedDevices.ConfigSpec(types.VirtualDeviceConfigSpecOperationEdit)
+	deviceChange, err := removedDevices.ConfigSpec(types.VirtualDeviceConfigSpecOperationRemove)
 	if err != nil {
 		return types.VirtualMachineConfigSpec{}, err
 	}
@@ -960,12 +960,51 @@ func firstDiskDevice(devices object.VirtualDeviceList) *types.VirtualDisk {
 	return disks[0].(*types.VirtualDisk)
 }
 
-func disconnectDevice(device *types.VirtualDevice) {
-	if device.Connectable == nil {
-		device.Connectable = &types.VirtualDeviceConnectInfo{}
+func verifyPostInstallDevices(ctx context.Context, vm *object.VirtualMachine) error {
+	devices, err := vm.Device(ctx)
+	if err != nil {
+		return fmt.Errorf("verify post-install devices: read VM devices: %w", err)
 	}
-	device.Connectable.Connected = false
-	device.Connectable.StartConnected = false
+	if count := len(devices.SelectByType((*types.VirtualCdrom)(nil))); count > 0 {
+		return fmt.Errorf("verify post-install devices: %d CD/DVD drive(s) still attached", count)
+	}
+	if count := len(devices.SelectByType((*types.VirtualSerialPort)(nil))); count > 0 {
+		return fmt.Errorf("verify post-install devices: %d serial port(s) still attached", count)
+	}
+
+	diskDevice := firstDiskDevice(devices)
+	if diskDevice == nil {
+		return errors.New("verify post-install devices: no virtual disk found for final boot order")
+	}
+
+	var vmMO mo.VirtualMachine
+	if err := vm.Properties(ctx, vm.Reference(), []string{"config.bootOptions"}, &vmMO); err != nil {
+		return fmt.Errorf("verify post-install devices: read VM boot options: %w", err)
+	}
+	if vmMO.Config == nil {
+		return errors.New("verify post-install devices: VM config unavailable")
+	}
+	if err := verifyDiskOnlyBootOrder(vmMO.Config.BootOptions, diskDevice.Key); err != nil {
+		return fmt.Errorf("verify post-install devices: %w", err)
+	}
+	return nil
+}
+
+func verifyDiskOnlyBootOrder(bootOptions *types.VirtualMachineBootOptions, diskKey int32) error {
+	if bootOptions == nil {
+		return errors.New("boot options unavailable")
+	}
+	if len(bootOptions.BootOrder) != 1 {
+		return fmt.Errorf("boot order has %d entries, want exactly one disk entry", len(bootOptions.BootOrder))
+	}
+	bootDisk, ok := bootOptions.BootOrder[0].(*types.VirtualMachineBootOptionsBootableDiskDevice)
+	if !ok {
+		return fmt.Errorf("boot order contains %T, want disk boot device", bootOptions.BootOrder[0])
+	}
+	if bootDisk.DeviceKey != diskKey {
+		return fmt.Errorf("boot order disk key = %d, want %d", bootDisk.DeviceKey, diskKey)
+	}
+	return nil
 }
 
 func applyFinalHardware(ctx context.Context, vm *object.VirtualMachine, cfg Config) error {
