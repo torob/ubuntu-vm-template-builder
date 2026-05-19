@@ -26,6 +26,21 @@ const (
 	syslinuxTimeoutSetting  = "timeout 1"
 )
 
+var installedGuestGRUBCleanupScript = strings.Join([]string{
+	`set -eu`,
+	`file=${GRUB_DEFAULT_FILE:-/etc/default/grub}`,
+	`[ -f "$file" ] || exit 0`,
+	`line=$(grep -m1 "^GRUB_CMDLINE_LINUX_DEFAULT=" "$file" || true)`,
+	`[ -n "$line" ] || exit 0`,
+	`value=${line#GRUB_CMDLINE_LINUX_DEFAULT=}`,
+	`value=${value#\"}`,
+	`value=${value%\"}`,
+	`clean=""`,
+	`for arg in $value; do case "$arg" in console=tty0|console=ttyS0,115200n8|autoinstall|ds=nocloud\;s=/cdrom/nocloud/|ds=nocloud\\\;s=/cdrom/nocloud/) continue ;; esac; if [ -n "$clean" ]; then clean="$clean $arg"; else clean="$arg"; fi; done`,
+	`escaped=$(printf "%s\n" "$clean" | sed "s/[\/&]/\\\\&/g")`,
+	`sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$escaped\"|" "$file"`,
+}, "; ")
+
 type isoFileMapping struct {
 	LocalPath string
 	ISOPath   string
@@ -93,6 +108,9 @@ func TransformUserData(userData []byte) ([]byte, error) {
 		return nil, err
 	}
 	common.SetMappingScalar(autoinstall, "shutdown", "poweroff")
+	if err := appendInstalledGuestGRUBCleanupLateCommands(autoinstall); err != nil {
+		return nil, err
+	}
 
 	var out bytes.Buffer
 	encoder := yaml.NewEncoder(&out)
@@ -106,6 +124,35 @@ func TransformUserData(userData []byte) ([]byte, error) {
 	}
 
 	return common.EnsureCloudConfigHeader(out.Bytes()), nil
+}
+
+func appendInstalledGuestGRUBCleanupLateCommands(autoinstall *yaml.Node) error {
+	lateCommands := common.MappingValue(autoinstall, "late-commands")
+	if lateCommands == nil {
+		lateCommands = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		autoinstall.Content = append(autoinstall.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "late-commands"},
+			lateCommands,
+		)
+	} else if lateCommands.Kind != yaml.SequenceNode {
+		return errors.New("autoinstall.late-commands must be a sequence when present")
+	}
+
+	for _, command := range installedGuestGRUBCleanupLateCommands() {
+		lateCommands.Content = append(lateCommands.Content, &yaml.Node{
+			Kind:  yaml.ScalarNode,
+			Tag:   "!!str",
+			Value: command,
+		})
+	}
+	return nil
+}
+
+func installedGuestGRUBCleanupLateCommands() []string {
+	return []string{
+		"curtin in-target --target=/target -- sh -c '" + installedGuestGRUBCleanupScript + "'",
+		"curtin in-target --target=/target -- update-grub",
+	}
 }
 
 func prepareBootConfigMappings(sourceISO, workDir string) ([]isoFileMapping, error) {

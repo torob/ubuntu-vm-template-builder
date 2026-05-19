@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,130 @@ autoinstall:
 	shutdown := common.MappingValue(autoinstall, "shutdown")
 	if shutdown == nil || shutdown.Kind != yaml.ScalarNode || shutdown.Value != "poweroff" {
 		t.Fatalf("transformed shutdown = %#v, want scalar poweroff", shutdown)
+	}
+}
+
+func TestTransformUserDataAppendsInstalledGuestGRUBCleanupLateCommands(t *testing.T) {
+	original := []byte(`#cloud-config
+autoinstall:
+  version: 1
+  late-commands:
+    - echo user command
+`)
+
+	transformed, err := TransformUserData(original)
+	if err != nil {
+		t.Fatalf("TransformUserData returned error: %v", err)
+	}
+
+	autoinstall, err := common.ParseAutoinstallMapping(transformed)
+	if err != nil {
+		t.Fatalf("parse transformed user-data: %v", err)
+	}
+	commands := lateCommandValues(t, autoinstall)
+	wantCommands := installedGuestGRUBCleanupLateCommands()
+	want := append([]string{"echo user command"}, wantCommands...)
+	if strings.Join(commands, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("late-commands = %#v, want %#v", commands, want)
+	}
+}
+
+func TestTransformUserDataCreatesLateCommandsForInstalledGuestGRUBCleanup(t *testing.T) {
+	original := []byte(`#cloud-config
+autoinstall:
+  version: 1
+`)
+
+	transformed, err := TransformUserData(original)
+	if err != nil {
+		t.Fatalf("TransformUserData returned error: %v", err)
+	}
+
+	autoinstall, err := common.ParseAutoinstallMapping(transformed)
+	if err != nil {
+		t.Fatalf("parse transformed user-data: %v", err)
+	}
+	commands := lateCommandValues(t, autoinstall)
+	want := installedGuestGRUBCleanupLateCommands()
+	if strings.Join(commands, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("late-commands = %#v, want %#v", commands, want)
+	}
+}
+
+func TestTransformUserDataRejectsNonSequenceLateCommands(t *testing.T) {
+	original := []byte(`#cloud-config
+autoinstall:
+  version: 1
+  late-commands: echo invalid
+`)
+
+	_, err := TransformUserData(original)
+	if err == nil {
+		t.Fatal("TransformUserData returned nil error for scalar late-commands")
+	}
+	if !strings.Contains(err.Error(), "late-commands") || !strings.Contains(err.Error(), "sequence") {
+		t.Fatalf("error %q does not explain invalid late-commands", err.Error())
+	}
+}
+
+func TestInstalledGuestGRUBCleanupScriptRemovesOnlyBuilderArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "preserves other args",
+			in:   `GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 hello=1 console=ttyS0,115200n8"`,
+			want: `GRUB_CMDLINE_LINUX_DEFAULT="hello=1"`,
+		},
+		{
+			name: "removes all builder args",
+			in:   `GRUB_CMDLINE_LINUX_DEFAULT="autoinstall ds=nocloud;s=/cdrom/nocloud/ console=tty0 console=ttyS0,115200n8"`,
+			want: `GRUB_CMDLINE_LINUX_DEFAULT=""`,
+		},
+		{
+			name: "removes escaped nocloud arg",
+			in:   `GRUB_CMDLINE_LINUX_DEFAULT="quiet ds=nocloud\;s=/cdrom/nocloud/ splash"`,
+			want: `GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"`,
+		},
+		{
+			name: "leaves unrelated args unchanged",
+			in:   `GRUB_CMDLINE_LINUX_DEFAULT="quiet splash foo=a/b bar=a&b"`,
+			want: `GRUB_CMDLINE_LINUX_DEFAULT="quiet splash foo=a/b bar=a&b"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			grubPath := filepath.Join(t.TempDir(), "grub")
+			input := strings.Join([]string{
+				`GRUB_TIMEOUT=0`,
+				test.in,
+				`GRUB_TERMINAL=console`,
+			}, "\n") + "\n"
+			if err := os.WriteFile(grubPath, []byte(input), 0o644); err != nil {
+				t.Fatalf("write grub file: %v", err)
+			}
+
+			cmd := exec.Command("sh", "-c", installedGuestGRUBCleanupScript)
+			cmd.Env = append(os.Environ(), "GRUB_DEFAULT_FILE="+grubPath)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("cleanup script failed: %v\n%s", err, out)
+			}
+
+			gotBytes, err := os.ReadFile(grubPath)
+			if err != nil {
+				t.Fatalf("read grub file: %v", err)
+			}
+			got := string(gotBytes)
+			if !strings.Contains(got, test.want+"\n") {
+				t.Fatalf("cleaned grub file missing %q:\n%s", test.want, got)
+			}
+			if !strings.Contains(got, "GRUB_TIMEOUT=0\n") || !strings.Contains(got, "GRUB_TERMINAL=console\n") {
+				t.Fatalf("cleanup script changed unrelated grub lines:\n%s", got)
+			}
+		})
 	}
 }
 
@@ -101,6 +226,22 @@ autoinstall:
 			t.Fatalf("generated meta-data missing %q in:\n%s", want, metaData)
 		}
 	}
+}
+
+func lateCommandValues(t *testing.T, autoinstall *yaml.Node) []string {
+	t.Helper()
+	lateCommands := common.MappingValue(autoinstall, "late-commands")
+	if lateCommands == nil || lateCommands.Kind != yaml.SequenceNode {
+		t.Fatalf("late-commands = %#v, want sequence", lateCommands)
+	}
+	var commands []string
+	for _, node := range lateCommands.Content {
+		if node.Kind != yaml.ScalarNode {
+			t.Fatalf("late-command node = %#v, want scalar", node)
+		}
+		commands = append(commands, node.Value)
+	}
+	return commands
 }
 
 func TestAddAutoinstallKernelArgs(t *testing.T) {
