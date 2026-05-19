@@ -216,7 +216,7 @@ func (i *Installer) Install() bool {
 	state.vm = vm
 	state.vmCreated = true
 
-	consoleStreamer := newDatastoreConsoleStreamer(placement.Datastore, remoteConsoleLogPath, datastoreConsoleLogPath, os.Stdout)
+	consoleStreamer := newDatastoreConsoleStreamer(placement.Datastore, placement.Host, remoteConsoleLogPath, datastoreConsoleLogPath, os.Stdout)
 	if err := powerOnAndWaitForInstaller(ctx, vm, consoleStreamer); err != nil {
 		fmt.Printf("vCenter installation failed for %s: %v\n", i.cfg.DisplayName, err)
 		return false
