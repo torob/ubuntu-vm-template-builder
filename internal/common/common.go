@@ -253,6 +253,29 @@ func CheckISOFile(path string) error {
 	return nil
 }
 
+func OpenISOFilesystem(path string) (*iso9660.FileSystem, func() error, error) {
+	d, err := diskfs.Open(path, diskfs.WithOpenMode(diskfs.ReadOnly))
+	if err != nil {
+		return nil, nil, fmt.Errorf("open ISO %q: %w", path, err)
+	}
+
+	fs, err := d.GetFilesystem(0)
+	if err != nil {
+		_ = d.Close()
+		return nil, nil, fmt.Errorf("read filesystem from ISO %q: %w", path, err)
+	}
+	isoFS, ok := fs.(*iso9660.FileSystem)
+	if !ok {
+		_ = fs.Close()
+		_ = d.Close()
+		return nil, nil, fmt.Errorf("filesystem in %q is not ISO9660", path)
+	}
+	closeFn := func() error {
+		return errors.Join(isoFS.Close(), d.Close())
+	}
+	return isoFS, closeFn, nil
+}
+
 func LoadUserData(path string) ([]byte, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

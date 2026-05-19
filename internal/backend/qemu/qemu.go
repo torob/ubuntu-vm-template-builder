@@ -1,6 +1,7 @@
 package qemu
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"ubuntu-vm-template-builder/internal/common"
+	"ubuntu-vm-template-builder/internal/isoutil"
+	"ubuntu-vm-template-builder/internal/offlineapt"
 	"ubuntu-vm-template-builder/internal/qemulog"
 )
 
@@ -32,18 +35,20 @@ const (
 )
 
 type Config struct {
-	UbuntuISO    string
-	ImagePath    string
-	UserDataPath string
-	UserData     []byte
-	DiskSize     string
-	DiskFormat   string
-	DisplayName  string
-	Hardware     common.HardwareConfig
+	UbuntuISO     string
+	ImagePath     string
+	UserDataPath  string
+	UserData      []byte
+	DiskSize      string
+	DiskFormat    string
+	DisplayName   string
+	Hardware      common.HardwareConfig
+	ExtraPackages offlineapt.Config
 }
 
 type Installer struct {
 	ubuntuISO            string
+	installerISO         string
 	imagePath            string
 	userData             []byte
 	diskSize             string
@@ -53,6 +58,8 @@ type Installer struct {
 	ovmfVarsTemplatePath string
 	display              string
 	tempDir              string
+	extraPackages        offlineapt.Config
+	offlineRepo          offlineapt.Repository
 }
 
 type OSInfo struct {
@@ -113,6 +120,7 @@ func NewInstaller(cfg Config) (*Installer, error) {
 
 	return &Installer{
 		ubuntuISO:            cfg.UbuntuISO,
+		installerISO:         cfg.UbuntuISO,
 		imagePath:            cfg.ImagePath,
 		userData:             cfg.UserData,
 		diskSize:             cfg.DiskSize,
@@ -122,6 +130,7 @@ func NewInstaller(cfg Config) (*Installer, error) {
 		ovmfVarsTemplatePath: firmware.VarsPath,
 		display:              displayName,
 		tempDir:              tmpDir,
+		extraPackages:        cfg.ExtraPackages.Normalize(),
 	}, nil
 }
 
@@ -167,6 +176,9 @@ func CheckPrerequisites(cfg Config) error {
 		return err
 	}
 	if err := common.CheckISOFile(cfg.UbuntuISO); err != nil {
+		return err
+	}
+	if err := offlineapt.CheckPrerequisites(cfg.ExtraPackages); err != nil {
 		return err
 	}
 	if err := checkOutputPath(cfg.ImagePath); err != nil {
@@ -283,7 +295,16 @@ func (i *Installer) createSeedISO() (string, error) {
 	}
 	defer fs.Close()
 
-	if err := writeISOFile(fs, "/user-data", i.userData); err != nil {
+	seedUserData := i.userData
+	if i.extraPackages.Enabled() {
+		var err error
+		seedUserData, err = offlineapt.TransformUserData(i.userData, i.offlineRepo.InstallConfig())
+		if err != nil {
+			return "", fmt.Errorf("prepare extra package seed user-data: %w", err)
+		}
+	}
+
+	if err := writeISOFile(fs, "/user-data", seedUserData); err != nil {
 		return "", err
 	}
 	if err := writeISOFile(fs, "/meta-data", nil); err != nil {
@@ -354,16 +375,23 @@ func (i *Installer) extractBootFiles() (string, string, error) {
 	kernelPath := filepath.Join(i.tempDir, "vmlinuz")
 	initrdPath := filepath.Join(i.tempDir, "initrd")
 
-	if err := common.ExtractFileFromISO(i.ubuntuISO, "/casper/vmlinuz", kernelPath); err != nil {
+	if err := common.ExtractFileFromISO(i.activeISO(), "/casper/vmlinuz", kernelPath); err != nil {
 		return "", "", fmt.Errorf("extract kernel from ISO: %w", err)
 	}
-	if err := common.ExtractFileFromISO(i.ubuntuISO, "/casper/initrd", initrdPath); err != nil {
+	if err := common.ExtractFileFromISO(i.activeISO(), "/casper/initrd", initrdPath); err != nil {
 		return "", "", fmt.Errorf("extract initrd from ISO: %w", err)
 	}
 
 	fmt.Printf("OK extracted kernel: %s\n", kernelPath)
 	fmt.Printf("OK extracted initrd: %s\n", initrdPath)
 	return kernelPath, initrdPath, nil
+}
+
+func (i *Installer) activeISO() string {
+	if strings.TrimSpace(i.installerISO) != "" {
+		return i.installerISO
+	}
+	return i.ubuntuISO
 }
 
 func runInterruptibleCommand(cmd *exec.Cmd, signals <-chan os.Signal, grace time.Duration) error {
@@ -459,13 +487,42 @@ func (i *Installer) QEMUArgs(seedISOPath, kernelPath, initrdPath string) ([]stri
 
 	args = append(args,
 		"-drive", fmt.Sprintf("file=%s,format=%s,cache=none,if=%s", i.imagePath, i.diskFmt, i.hardware.QEMU.DiskInterface),
-		"-drive", fmt.Sprintf("file=%s,format=raw,readonly=on,if=%s", i.ubuntuISO, i.hardware.QEMU.ISOInterface),
+		"-drive", fmt.Sprintf("file=%s,format=raw,readonly=on,if=%s", i.activeISO(), i.hardware.QEMU.ISOInterface),
 		"-drive", fmt.Sprintf("file=%s,format=raw,readonly=on,if=%s", seedISOPath, i.hardware.QEMU.ISOInterface),
 		"-kernel", kernelPath,
 		"-initrd", initrdPath,
 		"-append", "autoinstall console=ttyS0,115200n8 ---",
 	)
 	return args, nil
+}
+
+func (i *Installer) prepareInstallerISO(ctx context.Context) error {
+	if !i.extraPackages.Enabled() {
+		i.installerISO = i.ubuntuISO
+		return nil
+	}
+
+	fmt.Println("Preparing offline APT repository for extra packages...")
+	repo, err := offlineapt.BuildRepository(ctx, i.extraPackages, i.ubuntuISO, i.tempDir)
+	if err != nil {
+		return fmt.Errorf("prepare offline APT repository: %w", err)
+	}
+	fmt.Printf("OK offline APT repository prepared with %d requested package(s): %s\n", len(repo.Packages), repo.Path)
+
+	remasteredISO := filepath.Join(i.tempDir, fmt.Sprintf("installer-%s.iso", common.SafeName(i.display)))
+	fmt.Println("Creating remastered installer ISO with offline APT repository...")
+	if err := isoutil.RemasterISO(ctx, i.ubuntuISO, remasteredISO, []isoutil.FileMapping{
+		{LocalPath: repo.Path, ISOPath: offlineapt.ISORepoPath},
+	}); err != nil {
+		return err
+	}
+	if err := offlineapt.ValidateEmbeddedRepository(remasteredISO, repo); err != nil {
+		return err
+	}
+	i.offlineRepo = repo
+	i.installerISO = remasteredISO
+	fmt.Printf("OK remastered installer ISO created: %s\n", remasteredISO)
+	return nil
 }
 
 func (i *Installer) uefiFirmwareArgs() ([]string, error) {
@@ -523,6 +580,11 @@ func (i *Installer) Install() bool {
 	fmt.Printf("%s\n", strings.Repeat("=", 60))
 
 	defer i.cleanup()
+
+	if err := i.prepareInstallerISO(context.Background()); err != nil {
+		fmt.Printf("Installation failed for %s: %v\n", i.display, err)
+		return false
+	}
 
 	seedISOPath, err := i.createSeedISO()
 	if err != nil {

@@ -22,18 +22,20 @@ import (
 	"github.com/vmware/govmomi/vim25/types"
 
 	"ubuntu-vm-template-builder/internal/common"
+	"ubuntu-vm-template-builder/internal/offlineapt"
 )
 
 const interruptCleanupTimeout = 2 * time.Minute
 
 type Config struct {
-	UbuntuISO    string
-	UserDataPath string
-	UserData     []byte
-	DiskSize     string
-	DisplayName  string
-	Hardware     common.HardwareConfig
-	VCenter      ConnectionConfig
+	UbuntuISO     string
+	UserDataPath  string
+	UserData      []byte
+	DiskSize      string
+	DisplayName   string
+	Hardware      common.HardwareConfig
+	ExtraPackages offlineapt.Config
+	VCenter       ConnectionConfig
 }
 
 type UploadConfig struct {
@@ -101,6 +103,7 @@ func NewInstaller(cfg Config) (*Installer, error) {
 	if strings.TrimSpace(cfg.DisplayName) == "" {
 		cfg.DisplayName = common.FallbackName
 	}
+	cfg.ExtraPackages = cfg.ExtraPackages.Normalize()
 	cfg.VCenter = normalizeConnectionConfig(cfg.VCenter, cfg.DisplayName)
 
 	return &Installer{cfg: cfg}, nil
@@ -141,7 +144,11 @@ func CheckPrerequisites(cfg Config) error {
 	if _, err := common.ParseDiskSize(cfg.DiskSize); err != nil {
 		return err
 	}
-	if _, err := TransformUserData(cfg.UserData); err != nil {
+	extraPackages := cfg.ExtraPackages.Normalize()
+	if err := offlineapt.CheckPrerequisites(extraPackages); err != nil {
+		return err
+	}
+	if _, err := TransformUserDataWithOptions(cfg.UserData, SeedOptions{}); err != nil {
 		return fmt.Errorf("prepare vCenter seed user-data: %w", err)
 	}
 	return nil
@@ -440,9 +447,23 @@ func (i *Installer) createInstallerISO(ctx context.Context) (string, error) {
 	if err := i.ensureTempDir(); err != nil {
 		return "", err
 	}
+	var repo offlineapt.Repository
+	if i.cfg.ExtraPackages.Enabled() {
+		fmt.Println("Preparing offline APT repository for extra packages...")
+		var err error
+		repo, err = offlineapt.BuildRepository(ctx, i.cfg.ExtraPackages, i.cfg.UbuntuISO, i.tempDir)
+		if err != nil {
+			return "", fmt.Errorf("prepare offline APT repository: %w", err)
+		}
+		fmt.Printf("OK offline APT repository prepared with %d requested package(s): %s\n", len(repo.Packages), repo.Path)
+	}
+
 	fmt.Println("Creating remastered autoinstall ISO...")
 	outputPath := filepath.Join(i.tempDir, fmt.Sprintf("installer-%s.iso", common.SafeName(i.cfg.VCenter.Name)))
-	if err := RemasterUbuntuISOWithNoCloud(ctx, i.cfg.UbuntuISO, outputPath, i.cfg.UserData, i.cfg.DisplayName, i.tempDir); err != nil {
+	if err := RemasterUbuntuISOWithNoCloud(ctx, i.cfg.UbuntuISO, outputPath, i.cfg.UserData, i.cfg.DisplayName, i.tempDir, repo.Path, SeedOptions{ExtraPackages: repo.InstallConfig()}); err != nil {
+		return "", err
+	}
+	if err := offlineapt.ValidateEmbeddedRepository(outputPath, repo); err != nil {
 		return "", err
 	}
 	fmt.Printf("OK remastered installer ISO created: %s\n", outputPath)

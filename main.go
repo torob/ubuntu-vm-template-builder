@@ -13,6 +13,7 @@ import (
 	"ubuntu-vm-template-builder/internal/backend/qemu"
 	"ubuntu-vm-template-builder/internal/backend/vcenter"
 	"ubuntu-vm-template-builder/internal/common"
+	"ubuntu-vm-template-builder/internal/offlineapt"
 )
 
 const (
@@ -97,6 +98,7 @@ func runQEMUBuild(program string, args []string, stdout, stderr io.Writer) int {
 		userDataPath       string
 		diskFormat         string
 		hardwareConfigPath string
+		extraPackagesPath  string
 	)
 
 	fs := flag.NewFlagSet(commandQEMU+" "+commandBuild, flag.ContinueOnError)
@@ -106,6 +108,7 @@ func runQEMUBuild(program string, args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&userDataPath, "user-data", "", "cloud-init autoinstall user-data file")
 	fs.StringVar(&diskFormat, "disk-format", qemu.DefaultDiskFormat, "Disk image format (raw, vmdk, or qcow2)")
 	fs.StringVar(&hardwareConfigPath, "hardware-config", "", "Hardware config YAML file containing disk_size")
+	fs.StringVar(&extraPackagesPath, "install-extra-packages", "", "YAML file with apt_url and packages to embed in the installer ISO")
 	fs.Usage = func() {
 		printQEMUBuildUsage(fs.Output(), program)
 	}
@@ -147,16 +150,22 @@ func runQEMUBuild(program string, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
+	extraPackages, err := offlineapt.LoadConfig(extraPackagesPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
 
 	cfg := qemu.Config{
-		UbuntuISO:    isoPath,
-		ImagePath:    imagePath,
-		UserDataPath: userDataPath,
-		UserData:     userData,
-		DiskSize:     hardware.DiskSize,
-		DiskFormat:   diskFormat,
-		DisplayName:  displayName,
-		Hardware:     hardware,
+		UbuntuISO:     isoPath,
+		ImagePath:     imagePath,
+		UserDataPath:  userDataPath,
+		UserData:      userData,
+		DiskSize:      hardware.DiskSize,
+		DiskFormat:    diskFormat,
+		DisplayName:   displayName,
+		Hardware:      hardware,
+		ExtraPackages: extraPackages,
 	}
 
 	fmt.Println("Checking prerequisites...")
@@ -218,6 +227,7 @@ func runVCenterBuild(program string, args []string, stdout, stderr io.Writer) in
 		vcenterFolder      string
 		vcenterNetwork     string
 		templateName       string
+		extraPackagesPath  string
 	)
 
 	fs := flag.NewFlagSet(commandVCenter+" "+commandBuild, flag.ContinueOnError)
@@ -235,6 +245,7 @@ func runVCenterBuild(program string, args []string, stdout, stderr io.Writer) in
 	fs.StringVar(&vcenterFolder, "vcenter-folder", "", "VM folder name or inventory path")
 	fs.StringVar(&vcenterNetwork, "vcenter-network", "", "Network name or inventory path")
 	fs.StringVar(&templateName, "template-name", "", "vCenter VM/template name (defaults to user-data hostname)")
+	fs.StringVar(&extraPackagesPath, "install-extra-packages", "", "YAML file with apt_url and packages to embed in the installer ISO")
 	fs.Usage = func() {
 		printVCenterBuildUsage(fs.Output(), program)
 	}
@@ -285,14 +296,20 @@ func runVCenterBuild(program string, args []string, stdout, stderr io.Writer) in
 	if strings.TrimSpace(templateName) == "" {
 		templateName = displayName
 	}
+	extraPackages, err := offlineapt.LoadConfig(extraPackagesPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
 
 	cfg := vcenter.Config{
-		UbuntuISO:    isoPath,
-		UserDataPath: userDataPath,
-		UserData:     userData,
-		DiskSize:     hardware.DiskSize,
-		DisplayName:  displayName,
-		Hardware:     hardware,
+		UbuntuISO:     isoPath,
+		UserDataPath:  userDataPath,
+		UserData:      userData,
+		DiskSize:      hardware.DiskSize,
+		DisplayName:   displayName,
+		Hardware:      hardware,
+		ExtraPackages: extraPackages,
 		VCenter: vcenter.ConnectionConfig{
 			Host:       vcenterHost,
 			Username:   vcenterUsername,
@@ -481,6 +498,8 @@ func printQEMUBuildUsage(out io.Writer, program string) {
 	fmt.Fprintln(out, "        Disk image format: raw, qcow2, or vmdk (default \"raw\")")
 	fmt.Fprintln(out, "  --hardware-config string")
 	fmt.Fprintln(out, "        Hardware config YAML file containing disk_size and hardware settings")
+	fmt.Fprintln(out, "  --install-extra-packages string")
+	fmt.Fprintln(out, "        YAML file with apt_url and packages to embed in the installer ISO")
 }
 
 func printVCenterUsage(out io.Writer, program string) {
@@ -528,6 +547,8 @@ func printVCenterBuildUsage(out io.Writer, program string) {
 	fmt.Fprintln(out, "        Network name or inventory path")
 	fmt.Fprintln(out, "  --template-name string")
 	fmt.Fprintln(out, "        vCenter VM/template name (defaults to user-data hostname)")
+	fmt.Fprintln(out, "  --install-extra-packages string")
+	fmt.Fprintln(out, "        YAML file with apt_url and packages to embed in the installer ISO")
 }
 
 func printVCenterUploadUsage(out io.Writer, program string) {
@@ -649,6 +670,7 @@ func collectQEMUPrerequisites() prerequisiteReport {
 			"destination image path that does not already exist",
 			"writable destination image directory",
 			"hardware config YAML with disk_size set to a valid size such as 20G",
+			"--install-extra-packages config with apt_url and packages; when used, host tools apt-get, xorriso, and the Ubuntu archive keyring are checked during the build",
 		},
 	}
 }
@@ -670,6 +692,7 @@ func collectVCenterPrerequisites() prerequisiteReport {
 			"valid vCenter connection and placement flags",
 			"target ESXi host with access to the selected datastore and network",
 			"hardware config YAML with disk_size set to a valid size such as 20G",
+			"--install-extra-packages config with apt_url and packages; when used, host tools apt-get, xorriso, and the Ubuntu archive keyring are checked during the build",
 		},
 	}
 }

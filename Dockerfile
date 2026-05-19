@@ -25,6 +25,7 @@ RUN apt-get update \
         ovmf \
         qemu-system-x86 \
         qemu-utils \
+        ubuntu-keyring \
         xorriso \
     && rm -rf /var/lib/apt/lists/*
 

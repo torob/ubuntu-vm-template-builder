@@ -23,6 +23,8 @@ resulting image into your virtualization platform as a template.
 - OVMF UEFI firmware for the default `boot_firmware: uefi` hardware config
 - Accessible `/dev/kvm`, because QEMU is launched with `--enable-kvm`
 - `xorriso` when using the `vcenter` command
+- `apt-get`, `xorriso`, and the Ubuntu archive keyring when using
+  `--install-extra-packages`
 - An Ubuntu live-server ISO containing `/casper/vmlinuz` and `/casper/initrd`
 
 ## Usage
@@ -65,7 +67,8 @@ Then run:
   --image /path/to/output.img \
   --disk-format raw \
   --user-data autoinstall.uefi.example.yaml \
-  --hardware-config hardware.qemu.yaml
+  --hardware-config hardware.qemu.yaml \
+  --install-extra-packages extra-packages.yaml
 ```
 
 Build a vCenter VM or template:
@@ -85,7 +88,8 @@ Build a vCenter VM or template:
   --vcenter-datastore datastore1 \
   --vcenter-folder /DC0/vm/Templates \
   --vcenter-network 'VM Network' \
-  --template-name ubuntu-24.04-template
+  --template-name ubuntu-24.04-template \
+  --install-extra-packages extra-packages.yaml
 ```
 
 For `vcenter`, `--image` is not used. The output is a remote vCenter VM or
@@ -233,6 +237,48 @@ config or with `--vcenter-network`; the CLI flag overrides the config value.
 Set `vcenter.output_type: vm` to leave the installed guest as a powered-off VM
 instead of converting it to a template. The default is `template`.
 
+## Extra Offline Packages
+
+`--install-extra-packages` is optional for both `qemu build` and
+`vcenter build`. When set, the builder asks APT for the exact requested package
+closure, downloads those `.deb` files on the host with Ubuntu signature and hash
+verification enabled, embeds only those `.deb` files plus Ubuntu's signed
+`dists/...` metadata in the remastered installer ISO, and adds late-commands
+that install from `/cdrom/ubuntu-vm-template-builder/offline-apt`.
+
+Example config:
+
+```yaml
+apt_url: http://archive.ubuntu.com/ubuntu
+packages:
+  - git
+  - curl
+# optional; defaults shown
+components:
+  - main
+  - restricted
+  - universe
+  - multiverse
+suites:
+  - release
+  - updates
+  - security
+```
+
+`apt_url` should point to an Ubuntu mirror that contains the ISO release. The
+builder detects the release codename from the ISO and expands `release`,
+`updates`, `security`, and `backports` to codename-based suites such as
+`noble`, `noble-updates`, `noble-security`, and `noble-backports`.
+
+This feature does not change `autoinstall.packages`. If your user-data already
+uses `autoinstall.packages`, the Ubuntu installer will continue to handle those
+packages normally. The extra packages listed in `--install-extra-packages` are
+installed later from the ISO-local repository, so they can work without guest
+internet access as long as all needed dependencies were downloaded by the host.
+Inside the guest, APT verifies the embedded repository against Ubuntu's public
+archive key using the copied `InRelease` metadata; the package indexes are not
+trimmed because that would break Ubuntu's signed hashes.
+
 Example:
 
 ```yaml
@@ -257,8 +303,8 @@ Build and run with Docker:
 docker build -t ubuntu-vm-template-builder .
 ```
 
-The image includes the compiled builder, QEMU, `qemu-img`, OVMF firmware, and
-`xorriso`.
+The image includes the compiled builder, QEMU, `qemu-img`, OVMF firmware,
+`xorriso`, and the Ubuntu archive keyring.
 It still needs access to the host KVM device, and input/output paths must be
 mounted into the container. This example mounts the current directory at
 `/work` and writes the output image as your host user:

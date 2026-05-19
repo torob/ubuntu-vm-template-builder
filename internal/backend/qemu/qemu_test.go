@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ubuntu-vm-template-builder/internal/common"
+	"ubuntu-vm-template-builder/internal/offlineapt"
 )
 
 func TestRunInterruptibleCommandStopsProcessOnInterrupt(t *testing.T) {
@@ -169,6 +170,45 @@ func TestQEMUArgsUEFIUsesOVMFPFlash(t *testing.T) {
 	}
 	if string(copied) != "vars" {
 		t.Fatalf("copied vars = %q, want vars", copied)
+	}
+}
+
+func TestCreateSeedISOAddsOfflinePackageLateCommands(t *testing.T) {
+	dir := t.TempDir()
+	installer := &Installer{
+		display: "extra-packages",
+		tempDir: dir,
+		userData: []byte(`#cloud-config
+autoinstall:
+  version: 1
+  late-commands:
+    - echo user command
+`),
+		extraPackages: offlineapt.Config{Packages: []string{"git"}},
+		offlineRepo: offlineapt.Repository{
+			Packages: []string{"git"},
+			Sources:  []offlineapt.RepositorySource{{Suite: "noble", Components: []string{"main"}}},
+		},
+	}
+
+	seedPath, err := installer.createSeedISO()
+	if err != nil {
+		t.Fatalf("createSeedISO returned error: %v", err)
+	}
+	userData, err := common.ReadISOFile(seedPath, "/user-data")
+	if err != nil {
+		t.Fatalf("read seed user-data: %v", err)
+	}
+	for _, want := range []string{
+		"signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg check-date=no",
+		"file:/var/lib/ubuntu-vm-template-builder/offline-apt noble main",
+		"-y install",
+		"git",
+		"echo user command",
+	} {
+		if !strings.Contains(string(userData), want) {
+			t.Fatalf("seed user-data missing %q in:\n%s", want, userData)
+		}
 	}
 }
 

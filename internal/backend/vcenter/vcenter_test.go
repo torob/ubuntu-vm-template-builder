@@ -23,6 +23,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"ubuntu-vm-template-builder/internal/common"
+	"ubuntu-vm-template-builder/internal/offlineapt"
 )
 
 func TestTransformUserDataAddsPoweroffShutdown(t *testing.T) {
@@ -97,6 +98,44 @@ autoinstall:
 	}
 	commands := lateCommandValues(t, autoinstall)
 	want := installedGuestGRUBCleanupLateCommands()
+	if strings.Join(commands, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("late-commands = %#v, want %#v", commands, want)
+	}
+}
+
+func TestTransformUserDataWithOptionsPrependsExtraPackageCommands(t *testing.T) {
+	original := []byte(`#cloud-config
+autoinstall:
+  version: 1
+  packages:
+    - vim
+  late-commands:
+    - echo user command
+`)
+
+	install := offlineapt.InstallConfig{
+		Packages: []string{"git"},
+		Sources:  []offlineapt.RepositorySource{{Suite: "noble", Components: []string{"main"}}},
+	}
+	transformed, err := TransformUserDataWithOptions(original, SeedOptions{ExtraPackages: install})
+	if err != nil {
+		t.Fatalf("TransformUserDataWithOptions returned error: %v", err)
+	}
+	autoinstall, err := common.ParseAutoinstallMapping(transformed)
+	if err != nil {
+		t.Fatalf("parse transformed user-data: %v", err)
+	}
+
+	packages := common.MappingValue(autoinstall, "packages")
+	if packages == nil || packages.Kind != yaml.SequenceNode || len(packages.Content) != 1 || packages.Content[0].Value != "vim" {
+		t.Fatalf("autoinstall.packages changed: %#v", packages)
+	}
+
+	commands := lateCommandValues(t, autoinstall)
+	extraCommands := offlineapt.InstallLateCommands(install)
+	grubCommands := installedGuestGRUBCleanupLateCommands()
+	want := append(append([]string{}, extraCommands...), "echo user command")
+	want = append(want, grubCommands...)
 	if strings.Join(commands, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("late-commands = %#v, want %#v", commands, want)
 	}
@@ -196,7 +235,7 @@ autoinstall:
 	if err != nil {
 		t.Fatalf("read source user-data: %v", err)
 	}
-	seedDir, err := CreateNoCloudSeedDir(dir, sourceBytes, "seeded-template")
+	seedDir, err := CreateNoCloudSeedDir(dir, sourceBytes, "seeded-template", SeedOptions{})
 	if err != nil {
 		t.Fatalf("CreateNoCloudSeedDir returned error: %v", err)
 	}

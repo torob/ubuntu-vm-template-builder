@@ -6,13 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"ubuntu-vm-template-builder/internal/common"
+	"ubuntu-vm-template-builder/internal/isoutil"
+	"ubuntu-vm-template-builder/internal/offlineapt"
 )
 
 const (
@@ -41,13 +42,12 @@ var installedGuestGRUBCleanupScript = strings.Join([]string{
 	`sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$escaped\"|" "$file"`,
 }, "; ")
 
-type isoFileMapping struct {
-	LocalPath string
-	ISOPath   string
+type SeedOptions struct {
+	ExtraPackages offlineapt.InstallConfig
 }
 
-func RemasterUbuntuISOWithNoCloud(ctx context.Context, sourceISO, outputISO string, userData []byte, displayName, workDir string) error {
-	seedDir, err := CreateNoCloudSeedDir(workDir, userData, displayName)
+func RemasterUbuntuISOWithNoCloud(ctx context.Context, sourceISO, outputISO string, userData []byte, displayName, workDir string, offlineRepoPath string, options SeedOptions) error {
+	seedDir, err := CreateNoCloudSeedDir(workDir, userData, displayName, options)
 	if err != nil {
 		return err
 	}
@@ -57,30 +57,22 @@ func RemasterUbuntuISOWithNoCloud(ctx context.Context, sourceISO, outputISO stri
 		return err
 	}
 
-	args := []string{
-		"-indev", sourceISO,
-		"-outdev", outputISO,
-		"-map", seedDir, "/nocloud",
+	mappings := []isoutil.FileMapping{{LocalPath: seedDir, ISOPath: "/nocloud"}}
+	if strings.TrimSpace(offlineRepoPath) != "" {
+		mappings = append(mappings, isoutil.FileMapping{LocalPath: offlineRepoPath, ISOPath: offlineapt.ISORepoPath})
 	}
-	for _, mapping := range bootMappings {
-		args = append(args, "-map", mapping.LocalPath, mapping.ISOPath)
-	}
-	args = append(args, "-boot_image", "any", "replay")
+	mappings = append(mappings, bootMappings...)
 
-	cmd := exec.CommandContext(ctx, "xorriso", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("xorriso remaster failed: %v (%s)", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return isoutil.RemasterISO(ctx, sourceISO, outputISO, mappings)
 }
 
-func CreateNoCloudSeedDir(workDir string, userData []byte, displayName string) (string, error) {
+func CreateNoCloudSeedDir(workDir string, userData []byte, displayName string, options SeedOptions) (string, error) {
 	seedDir := filepath.Join(workDir, "nocloud")
 	if err := os.MkdirAll(seedDir, 0o700); err != nil {
 		return "", fmt.Errorf("create NoCloud seed directory: %w", err)
 	}
 
-	transformedUserData, err := TransformUserData(userData)
+	transformedUserData, err := TransformUserDataWithOptions(userData, options)
 	if err != nil {
 		return "", err
 	}
@@ -98,6 +90,10 @@ func CreateNoCloudSeedDir(workDir string, userData []byte, displayName string) (
 }
 
 func TransformUserData(userData []byte) ([]byte, error) {
+	return TransformUserDataWithOptions(userData, SeedOptions{})
+}
+
+func TransformUserDataWithOptions(userData []byte, options SeedOptions) ([]byte, error) {
 	var root yaml.Node
 	if err := yaml.Unmarshal(userData, &root); err != nil {
 		return nil, fmt.Errorf("parse YAML: %w", err)
@@ -108,6 +104,9 @@ func TransformUserData(userData []byte) ([]byte, error) {
 		return nil, err
 	}
 	common.SetMappingScalar(autoinstall, "shutdown", "poweroff")
+	if err := offlineapt.PrependInstallLateCommands(autoinstall, options.ExtraPackages); err != nil {
+		return nil, err
+	}
 	if err := appendInstalledGuestGRUBCleanupLateCommands(autoinstall); err != nil {
 		return nil, err
 	}
@@ -155,7 +154,7 @@ func installedGuestGRUBCleanupLateCommands() []string {
 	}
 }
 
-func prepareBootConfigMappings(sourceISO, workDir string) ([]isoFileMapping, error) {
+func prepareBootConfigMappings(sourceISO, workDir string) ([]isoutil.FileMapping, error) {
 	bootConfigPaths := []string{
 		"/boot/grub/grub.cfg",
 		"/boot/grub/loopback.cfg",
@@ -168,7 +167,7 @@ func prepareBootConfigMappings(sourceISO, workDir string) ([]isoFileMapping, err
 		return nil, fmt.Errorf("create boot config work directory: %w", err)
 	}
 
-	var mappings []isoFileMapping
+	var mappings []isoutil.FileMapping
 	foundConfig := false
 	for _, isoPath := range bootConfigPaths {
 		data, err := common.ReadISOFile(sourceISO, isoPath)
@@ -186,7 +185,7 @@ func prepareBootConfigMappings(sourceISO, workDir string) ([]isoFileMapping, err
 		if err := os.WriteFile(localPath, updated, 0o600); err != nil {
 			return nil, fmt.Errorf("write patched boot config %s: %w", isoPath, err)
 		}
-		mappings = append(mappings, isoFileMapping{LocalPath: localPath, ISOPath: isoPath})
+		mappings = append(mappings, isoutil.FileMapping{LocalPath: localPath, ISOPath: isoPath})
 	}
 
 	if !foundConfig {

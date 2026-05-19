@@ -65,6 +65,9 @@ func TestBuildCommandHelpExitsSuccessfully(t *testing.T) {
 			if !strings.Contains(stderr.String(), "--hardware-config") {
 				t.Fatalf("%s %s --help output missing --hardware-config:\n%s", command, commandBuild, stderr.String())
 			}
+			if !strings.Contains(stderr.String(), "--install-extra-packages") {
+				t.Fatalf("%s %s --help output missing --install-extra-packages:\n%s", command, commandBuild, stderr.String())
+			}
 			if !strings.Contains(stderr.String(), "Usage: ubuntu-vm-template-builder "+command+" "+commandBuild) {
 				t.Fatalf("%s %s help output has unexpected usage:\n%s", command, commandBuild, stderr.String())
 			}
@@ -469,6 +472,77 @@ func TestEffectiveVCenterNetworkPrefersCLI(t *testing.T) {
 	}
 }
 
+func TestBuildCommandsRejectInvalidInstallExtraPackagesConfig(t *testing.T) {
+	dir := t.TempDir()
+	userDataPath := filepath.Join(dir, "user-data.yaml")
+	if err := os.WriteFile(userDataPath, []byte(`#cloud-config
+autoinstall:
+  version: 1
+`), 0o644); err != nil {
+		t.Fatalf("write user-data: %v", err)
+	}
+	qemuHardwarePath := writeTempHardwareConfig(t, "disk_size: 20G\nboot_firmware: bios\n")
+	vcenterHardwarePath := writeTempHardwareConfig(t, "disk_size: 20G\nvcenter:\n  network: VM Network\n")
+	extraPath := filepath.Join(dir, "extra-packages.yaml")
+	if err := os.WriteFile(extraPath, []byte("apt_url: http://archive.ubuntu.com/ubuntu\n"), 0o644); err != nil {
+		t.Fatalf("write extra packages config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "qemu",
+			args: []string{
+				"ubuntu-vm-template-builder",
+				"qemu",
+				"build",
+				"--iso", "missing.iso",
+				"--image", filepath.Join(dir, "output.img"),
+				"--user-data", userDataPath,
+				"--hardware-config", qemuHardwarePath,
+				"--install-extra-packages", extraPath,
+			},
+		},
+		{
+			name: "vcenter",
+			args: []string{
+				"ubuntu-vm-template-builder",
+				"vcenter",
+				"build",
+				"--iso", "missing.iso",
+				"--user-data", userDataPath,
+				"--hardware-config", vcenterHardwarePath,
+				"--vcenter-host", "vc.example.com",
+				"--vcenter-username", "administrator@vsphere.local",
+				"--vcenter-password", "secret",
+				"--vcenter-datacenter", "DC0",
+				"--vcenter-esxi-host", "esxi.example.com",
+				"--vcenter-datastore", "datastore1",
+				"--vcenter-folder", "vm",
+				"--install-extra-packages", extraPath,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(test.args, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("%s build returned success with invalid extra package config", test.name)
+			}
+			errOutput := stderr.String()
+			if !strings.Contains(errOutput, "install extra packages config") || !strings.Contains(errOutput, "packages") {
+				t.Fatalf("%s invalid extra package config error is unexpected:\n%s", test.name, errOutput)
+			}
+			if strings.Contains(errOutput, "ubuntu ISO file") {
+				t.Fatalf("%s should validate extra package config before checking ISO:\n%s", test.name, errOutput)
+			}
+		})
+	}
+}
+
 func TestRequiredFlagErrorsSorted(t *testing.T) {
 	got := requiredFlagErrors(map[string]string{
 		"zeta":  "",
@@ -570,7 +644,7 @@ func TestCommandUsageMentionsHardwareConfig(t *testing.T) {
 
 	out.Reset()
 	printQEMUBuildUsage(&out, "ubuntu-vm-template-builder")
-	if output := out.String(); !strings.Contains(output, "--hardware-config") || !strings.Contains(output, "qemu build") || strings.Contains(output, "--boot-mode") || strings.Contains(output, "--disk-size") {
+	if output := out.String(); !strings.Contains(output, "--hardware-config") || !strings.Contains(output, "--install-extra-packages") || !strings.Contains(output, "qemu build") || strings.Contains(output, "--boot-mode") || strings.Contains(output, "--disk-size") {
 		t.Fatalf("qemu build usage should mention --hardware-config and not removed flags:\n%s", output)
 	}
 
@@ -582,7 +656,7 @@ func TestCommandUsageMentionsHardwareConfig(t *testing.T) {
 
 	out.Reset()
 	printVCenterBuildUsage(&out, "ubuntu-vm-template-builder")
-	if output := out.String(); !strings.Contains(output, "--hardware-config") || !strings.Contains(output, "vcenter build") || strings.Contains(output, "--disk-size") || strings.Contains(output, "--vm-cpu") || strings.Contains(output, "--vm-memory-mb") {
+	if output := out.String(); !strings.Contains(output, "--hardware-config") || !strings.Contains(output, "--install-extra-packages") || !strings.Contains(output, "vcenter build") || strings.Contains(output, "--disk-size") || strings.Contains(output, "--vm-cpu") || strings.Contains(output, "--vm-memory-mb") {
 		t.Fatalf("vcenter build usage should mention --hardware-config and not removed hardware flags:\n%s", output)
 	}
 }
