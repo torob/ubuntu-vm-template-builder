@@ -3,473 +3,409 @@ package main
 import (
 	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
+
+	"ubuntu-vm-template-builder/internal/backend/qemu"
+	"ubuntu-vm-template-builder/internal/common"
 )
 
-func TestValidateUserDataReturnsHostname(t *testing.T) {
-	data := []byte(`#cloud-config
-autoinstall:
-  version: 1
-  identity:
-    hostname: test-host
-`)
-
-	hostname, err := validateUserData(data)
-	if err != nil {
-		t.Fatalf("validateUserData returned error: %v", err)
+func TestRunRequiresBackendSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ubuntu-vm-template-builder", "--backend", "qemu"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("run returned success for old --backend syntax")
 	}
-	if hostname != "test-host" {
-		t.Fatalf("hostname = %q, want %q", hostname, "test-host")
+	if !strings.Contains(stderr.String(), `unknown command "--backend"`) {
+		t.Fatalf("stderr does not explain old syntax is unsupported:\n%s", stderr.String())
 	}
 }
 
-func TestValidateUserDataRequiresAutoinstall(t *testing.T) {
-	_, err := validateUserData([]byte("not_autoinstall: true\n"))
-	if err == nil {
-		t.Fatal("validateUserData returned nil error for missing autoinstall")
+func TestSubcommandHelpExitsSuccessfully(t *testing.T) {
+	for _, command := range []string{"qemu", "vcenter"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"ubuntu-vm-template-builder", command, "--help"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("%s --help exit code = %d, stderr:\n%s", command, code, stderr.String())
+			}
+			output := stdout.String()
+			for _, want := range []string{commandBuild, commandHardwareConfigExample, commandPrerequisites} {
+				if !strings.Contains(output, want) {
+					t.Fatalf("%s --help output missing %q:\n%s", command, want, output)
+				}
+			}
+			if strings.Contains(output, "--hardware-config") {
+				t.Fatalf("%s backend help should not show build flags:\n%s", command, output)
+			}
+		})
 	}
 }
 
-func TestValidateUEFIPortableUserDataAcceptsDefaultStorageWithFallback(t *testing.T) {
-	data := []byte(`#cloud-config
-autoinstall:
-  version: 1
-  late-commands:
-    - curtin in-target --target=/target -- grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu --removable --recheck
-`)
-
-	if err := validateUEFIPortableUserData(data); err != nil {
-		t.Fatalf("validateUEFIPortableUserData returned error: %v", err)
+func TestBuildCommandHelpExitsSuccessfully(t *testing.T) {
+	for _, command := range []string{"qemu", "vcenter"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"ubuntu-vm-template-builder", command, commandBuild, "--help"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("%s %s --help exit code = %d, stderr:\n%s", command, commandBuild, code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "--hardware-config") {
+				t.Fatalf("%s %s --help output missing --hardware-config:\n%s", command, commandBuild, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "Usage: ubuntu-vm-template-builder "+command+" "+commandBuild) {
+				t.Fatalf("%s %s help output has unexpected usage:\n%s", command, commandBuild, stderr.String())
+			}
+		})
 	}
 }
 
-func TestValidateUEFIPortableUserDataAcceptsCustomESPAndFallback(t *testing.T) {
-	data := []byte(`#cloud-config
-autoinstall:
-  version: 1
-  storage:
-    config:
-      - id: disk0
-        type: disk
-        ptable: gpt
-      - id: part-efi
-        type: partition
-        device: disk0
-        size: 512M
-        flag: boot
-      - id: fs-efi
-        type: format
-        volume: part-efi
-        fstype: fat32
-      - id: mount-efi
-        type: mount
-        device: fs-efi
-        path: /boot/efi
-  late-commands:
-    - cp /target/boot/efi/EFI/ubuntu/grubx64.efi /target/boot/efi/EFI/BOOT/BOOTX64.EFI
-`)
-
-	if err := validateUEFIPortableUserData(data); err != nil {
-		t.Fatalf("validateUEFIPortableUserData returned error: %v", err)
-	}
-}
-
-func TestValidateUEFIPortableUserDataRejectsMissingFallback(t *testing.T) {
-	data := []byte(`#cloud-config
-autoinstall:
-  version: 1
-  storage:
-    layout:
-      name: direct
-`)
-
-	err := validateUEFIPortableUserData(data)
-	if err == nil {
-		t.Fatal("validateUEFIPortableUserData returned nil error without fallback command")
-	}
-	if !strings.Contains(err.Error(), "late-commands") || !strings.Contains(err.Error(), "--removable") {
-		t.Fatalf("error %q does not explain missing fallback command", err.Error())
-	}
-}
-
-func TestValidateUEFIPortableUserDataRejectsBIOSStorage(t *testing.T) {
-	data := []byte(`#cloud-config
-autoinstall:
-  version: 1
-  storage:
-    config:
-      - id: disk0
-        type: disk
-        ptable: gpt
-      - id: part-bios
-        type: partition
-        device: disk0
-        size: 1M
-        flag: bios_grub
-      - id: part-boot
-        type: partition
-        device: disk0
-        size: 1G
-        flag: boot
-      - id: fs-boot
-        type: format
-        volume: part-boot
-        fstype: ext4
-      - id: mount-boot
-        type: mount
-        device: fs-boot
-        path: /boot
-  late-commands:
-    - curtin in-target --target=/target -- grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu --removable --recheck
-`)
-
-	err := validateUEFIPortableUserData(data)
-	if err == nil {
-		t.Fatal("validateUEFIPortableUserData returned nil error for BIOS-style storage")
-	}
-	if !strings.Contains(err.Error(), "EFI System Partition") || !strings.Contains(err.Error(), "/boot/efi") {
-		t.Fatalf("error %q does not explain missing ESP", err.Error())
-	}
-}
-
-func TestExampleUserDataFiles(t *testing.T) {
-	uefiData, err := os.ReadFile("autoinstall.uefi.example.yaml")
-	if err != nil {
-		t.Fatalf("read UEFI example: %v", err)
-	}
-	if _, err := validateUserData(uefiData); err != nil {
-		t.Fatalf("UEFI example failed user-data validation: %v", err)
-	}
-	if err := validateUEFIPortableUserData(uefiData); err != nil {
-		t.Fatalf("UEFI example failed UEFI portability validation: %v", err)
-	}
-
-	biosData, err := os.ReadFile("autoinstall.bios.example.yaml")
-	if err != nil {
-		t.Fatalf("read BIOS example: %v", err)
-	}
-	if _, err := validateUserData(biosData); err != nil {
-		t.Fatalf("BIOS example failed user-data validation: %v", err)
-	}
-	if err := validateUEFIPortableUserData(biosData); err == nil {
-		t.Fatal("BIOS example unexpectedly passed UEFI portability validation")
-	}
-}
-
-func TestParseDiskSize(t *testing.T) {
-	tests := map[string]int64{
-		"1024": 1024,
-		"1K":   1024,
-		"2M":   2 * 1024 * 1024,
-		"3G":   3 * 1024 * 1024 * 1024,
-		"1GiB": 1024 * 1024 * 1024,
-		"1gib": 1024 * 1024 * 1024,
-		"1GB":  1024 * 1024 * 1024,
-	}
-
-	for input, want := range tests {
-		got, err := parseDiskSize(input)
-		if err != nil {
-			t.Fatalf("parseDiskSize(%q) returned error: %v", input, err)
-		}
-		if got != want {
-			t.Fatalf("parseDiskSize(%q) = %d, want %d", input, got, want)
-		}
-	}
-
-	if _, err := parseDiskSize("bad"); err == nil {
-		t.Fatal("parseDiskSize returned nil error for invalid size")
-	}
-}
-
-func TestCheckOutputPathRejectsExistingFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "existing.img")
-	if err := os.WriteFile(path, []byte("exists"), 0o644); err != nil {
-		t.Fatalf("create temp file: %v", err)
-	}
-
-	if err := checkOutputPath(path); err == nil {
-		t.Fatal("checkOutputPath returned nil error for existing output file")
-	}
-}
-
-func TestCheckOutputPathAcceptsWritableParent(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "new.img")
-
-	if err := checkOutputPath(path); err != nil {
-		t.Fatalf("checkOutputPath returned error: %v", err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("checkOutputPath created output path or returned unexpected stat error: %v", err)
-	}
-}
-
-func TestNormalizeBootModeDefaultsToUEFI(t *testing.T) {
-	if got := normalizeBootMode(""); got != bootModeUEFI {
-		t.Fatalf("normalizeBootMode empty = %q, want %q", got, bootModeUEFI)
-	}
-	if got := normalizeBootMode(" BIOS "); got != bootModeBIOS {
-		t.Fatalf("normalizeBootMode trims and lowercases to %q, want %q", got, bootModeBIOS)
-	}
-}
-
-func TestValidateBootMode(t *testing.T) {
-	for _, mode := range []string{"", "uefi", "UEFI", "bios", " BIOS "} {
-		if !validateBootMode(mode) {
-			t.Fatalf("validateBootMode(%q) = false, want true", mode)
-		}
-	}
-	if validateBootMode("legacy") {
-		t.Fatal("validateBootMode returned true for unsupported mode")
-	}
-}
-
-func TestRunInterruptibleCommandStopsProcessOnInterrupt(t *testing.T) {
-	if _, err := exec.LookPath("sleep"); err != nil {
-		t.Skip("sleep command is not available")
-	}
-
-	cmd := exec.Command("sleep", "30")
-	configureCommandProcessGroup(cmd)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start sleep command: %v", err)
-	}
-
-	signals := make(chan os.Signal, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- waitInterruptibleCommand(cmd, signals, 2*time.Second)
-	}()
-
-	signals <- os.Interrupt
-
-	select {
-	case err := <-errCh:
-		if err == nil {
-			t.Fatal("runInterruptibleCommand returned nil after interrupt")
-		}
-		if !strings.Contains(err.Error(), "interrupt") {
-			t.Fatalf("interrupt error = %q, want mention of interrupt", err.Error())
-		}
-	case <-time.After(3 * time.Second):
-		_ = signalCommandProcessGroup(cmd, syscall.SIGKILL)
-		t.Fatal("command did not stop after interrupt")
-	}
-}
-
-func TestQemuArgsUseNographicSerialConsole(t *testing.T) {
-	installer := &Installer{
-		ubuntuISO: "ubuntu.iso",
-		imagePath: "output.img",
-		diskFmt:   "raw",
-		bootMode:  bootModeBIOS,
-	}
-
-	args, err := installer.qemuArgs("seed.iso", "vmlinuz", "initrd")
-	if err != nil {
-		t.Fatalf("qemuArgs returned error: %v", err)
-	}
-	if !hasArg(args, "-nographic") {
-		t.Fatalf("qemu args %v do not contain -nographic", args)
-	}
-	if !hasArgPair(args, "-cpu", "host") {
-		t.Fatalf("qemu args %v do not use host CPU model", args)
-	}
-	if hasArg(args, "if=pflash,format=raw,readonly=on,file=OVMF_CODE.fd") {
-		t.Fatalf("bios qemu args %v unexpectedly contain OVMF pflash", args)
-	}
-	if hasArgPair(args, "-display", "none") {
-		t.Fatalf("qemu args %v still contain -display none", args)
-	}
-	appendValue := valueAfterArg(args, "-append")
-	if !strings.Contains(appendValue, "console=ttyS0,115200n8") {
-		t.Fatalf("qemu -append value %q does not enable ttyS0 console", appendValue)
-	}
-	if !hasArgPair(args, "-drive", "file=ubuntu.iso,format=raw,readonly=on,if=virtio") {
-		t.Fatalf("qemu args %v do not attach Ubuntu ISO as virtio block", args)
-	}
-	if !hasArgPair(args, "-drive", "file=seed.iso,format=raw,readonly=on,if=virtio") {
-		t.Fatalf("qemu args %v do not attach seed ISO as virtio block", args)
-	}
-	for _, arg := range args {
-		if strings.Contains(arg, "media=cdrom") {
-			t.Fatalf("qemu args %v still attach ISOs with media=cdrom", args)
-		}
-	}
-}
-
-func TestQemuArgsUEFIUsesOVMFPFlash(t *testing.T) {
-	dir := t.TempDir()
-	codePath := filepath.Join(dir, "OVMF_CODE.fd")
-	varsTemplatePath := filepath.Join(dir, "OVMF_VARS_TEMPLATE.fd")
-	if err := os.WriteFile(codePath, []byte("code"), 0o644); err != nil {
-		t.Fatalf("write code file: %v", err)
-	}
-	if err := os.WriteFile(varsTemplatePath, []byte("vars"), 0o644); err != nil {
-		t.Fatalf("write vars template: %v", err)
-	}
-
-	installer := &Installer{
-		ubuntuISO:            "ubuntu.iso",
-		imagePath:            "output.img",
-		diskFmt:              "raw",
-		bootMode:             bootModeUEFI,
-		ovmfCodePath:         codePath,
-		ovmfVarsTemplatePath: varsTemplatePath,
-		tempDir:              dir,
-	}
-
-	args, err := installer.qemuArgs("seed.iso", "vmlinuz", "initrd")
-	if err != nil {
-		t.Fatalf("qemuArgs returned error: %v", err)
-	}
-
-	if !hasArgPair(args, "-drive", "if=pflash,format=raw,readonly=on,file="+codePath) {
-		t.Fatalf("uefi qemu args %v do not contain readonly OVMF code pflash", args)
-	}
-	varsPath := filepath.Join(dir, "OVMF_VARS.fd")
-	if !hasArgPair(args, "-drive", "if=pflash,format=raw,file="+varsPath) {
-		t.Fatalf("uefi qemu args %v do not contain writable OVMF vars pflash", args)
-	}
-	copied, err := os.ReadFile(varsPath)
-	if err != nil {
-		t.Fatalf("read copied vars file: %v", err)
-	}
-	if string(copied) != "vars" {
-		t.Fatalf("copied vars = %q, want vars", copied)
-	}
-}
-
-func TestFindOVMFFirmwareInUsesFirstCompletePair(t *testing.T) {
-	dir := t.TempDir()
-	incompleteCode := filepath.Join(dir, "incomplete-code.fd")
-	completeCode := filepath.Join(dir, "complete-code.fd")
-	completeVars := filepath.Join(dir, "complete-vars.fd")
-	if err := os.WriteFile(incompleteCode, []byte("code"), 0o644); err != nil {
-		t.Fatalf("write incomplete code: %v", err)
-	}
-	if err := os.WriteFile(completeCode, []byte("code"), 0o644); err != nil {
-		t.Fatalf("write complete code: %v", err)
-	}
-	if err := os.WriteFile(completeVars, []byte("vars"), 0o644); err != nil {
-		t.Fatalf("write complete vars: %v", err)
-	}
-
-	got, err := findOVMFFirmwareIn([]ovmfFirmware{
-		{CodePath: incompleteCode, VarsPath: filepath.Join(dir, "missing-vars.fd")},
-		{CodePath: completeCode, VarsPath: completeVars},
-	})
-	if err != nil {
-		t.Fatalf("findOVMFFirmwareIn returned error: %v", err)
-	}
-	if got.CodePath != completeCode || got.VarsPath != completeVars {
-		t.Fatalf("findOVMFFirmwareIn = %+v, want complete pair", got)
-	}
-}
-
-func hasArg(args []string, name string) bool {
-	for _, arg := range args {
-		if arg == name {
-			return true
-		}
-	}
-	return false
-}
-
-func hasArgPair(args []string, name, value string) bool {
-	for idx := 0; idx+1 < len(args); idx++ {
-		if args[idx] == name && args[idx+1] == value {
-			return true
-		}
-	}
-	return false
-}
-
-func valueAfterArg(args []string, name string) string {
-	for idx := 0; idx+1 < len(args); idx++ {
-		if args[idx] == name {
-			return args[idx+1]
-		}
-	}
-	return ""
-}
-
-func TestIsPrerequisitesCommandAliases(t *testing.T) {
-	for _, command := range []string{"prerequisites", "prereqs", "prerequests", "prequests"} {
-		if !isPrerequisitesCommand(command) {
-			t.Fatalf("isPrerequisitesCommand(%q) = false, want true", command)
-		}
-	}
-	if isPrerequisitesCommand("install") {
-		t.Fatal("isPrerequisitesCommand returned true for install")
-	}
-}
-
-func TestParseOSRelease(t *testing.T) {
-	values := parseOSRelease([]byte(`NAME="Ubuntu"
-ID=ubuntu
-ID_LIKE="debian"
-VERSION_ID="26.04"
-`))
-
-	if values["NAME"] != "Ubuntu" {
-		t.Fatalf("NAME = %q, want Ubuntu", values["NAME"])
-	}
-	if values["ID"] != "ubuntu" {
-		t.Fatalf("ID = %q, want ubuntu", values["ID"])
-	}
-	if values["ID_LIKE"] != "debian" {
-		t.Fatalf("ID_LIKE = %q, want debian", values["ID_LIKE"])
-	}
-}
-
-func TestQemuInstallSuggestionDebianFamily(t *testing.T) {
-	osInfo := OSInfo{
-		GOOS:   "linux",
-		ID:     "ubuntu",
-		IDLike: []string{"debian"},
-	}
-
-	got := qemuInstallSuggestion(osInfo)
-	if !strings.Contains(got, "apt install") || !strings.Contains(got, "qemu-system-x86") || !strings.Contains(got, "qemu-utils") {
-		t.Fatalf("qemuInstallSuggestion returned %q, want apt qemu packages", got)
-	}
-}
-
-func TestOVMFInstallSuggestionDebianFamily(t *testing.T) {
-	osInfo := OSInfo{
-		GOOS:   "linux",
-		ID:     "debian",
-		IDLike: []string{"debian"},
-	}
-
-	got := ovmfInstallSuggestion(osInfo)
-	if !strings.Contains(got, "apt install") || !strings.Contains(got, "ovmf") || !strings.Contains(got, "--boot-mode bios") {
-		t.Fatalf("ovmfInstallSuggestion returned %q, want apt ovmf package and bios fallback", got)
-	}
-}
-
-func TestGoVersionAtLeast(t *testing.T) {
+func TestHardwareConfigExampleCommands(t *testing.T) {
 	tests := []struct {
-		output string
-		want   bool
+		command string
+		want    []string
+		absent  []string
 	}{
-		{output: "go version go1.26.2 linux/amd64", want: true},
-		{output: "go version go1.27.0 linux/amd64", want: true},
-		{output: "go version go1.25.9 linux/amd64", want: false},
-		{output: "not go output", want: false},
+		{
+			command: "qemu",
+			want: []string{
+				"boot_firmware: uefi",
+				"disk_size: 20G",
+				"vcpu: 2",
+				"memory_mb: 2048",
+				"qemu:",
+				"cpu_model: host",
+				"disk_interface: virtio",
+				"iso_interface: virtio",
+			},
+			absent: []string{"vcenter:"},
+		},
+		{
+			command: "vcenter",
+			want: []string{
+				"boot_firmware: uefi",
+				"disk_size: 20G",
+				"vcpu: 2",
+				"memory_mb: 2048",
+				"vcenter:",
+				"scsi_controller: pvscsi",
+				"network_adapter: vmxnet3",
+				"network: VM Network",
+				"disk_provisioning: thick_provision_lazy_zeroed",
+				"reserve_all_guest_memory: false",
+				"output_type: template",
+			},
+			absent: []string{"qemu:"},
+		},
 	}
 
 	for _, test := range tests {
-		if got := goVersionAtLeast(test.output, 1, 26); got != test.want {
-			t.Fatalf("goVersionAtLeast(%q) = %v, want %v", test.output, got, test.want)
+		t.Run(test.command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"ubuntu-vm-template-builder", test.command, commandHardwareConfigExample}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("%s %s exit code = %d, stderr:\n%s", test.command, commandHardwareConfigExample, code, stderr.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("%s %s wrote stderr:\n%s", test.command, commandHardwareConfigExample, stderr.String())
+			}
+
+			output := stdout.String()
+			for _, want := range test.want {
+				if !strings.Contains(output, want) {
+					t.Fatalf("%s example missing %q in:\n%s", test.command, want, output)
+				}
+			}
+			for _, absent := range test.absent {
+				if strings.Contains(output, absent) {
+					t.Fatalf("%s example unexpectedly contains %q in:\n%s", test.command, absent, output)
+				}
+			}
+
+			cfg := loadHardwareConfigExampleOutput(t, output)
+			if cfg.BootFirmware != common.BootFirmwareUEFI || cfg.DiskSize != "20G" || cfg.VCPU != 2 || cfg.MemoryMB != 2048 {
+				t.Fatalf("loaded example hardware config = %+v", cfg)
+			}
+		})
+	}
+}
+
+func TestHardwareConfigExampleHelpExitsSuccessfully(t *testing.T) {
+	for _, command := range []string{"qemu", "vcenter"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"ubuntu-vm-template-builder", command, commandHardwareConfigExample, "--help"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("%s %s --help exit code = %d, stderr:\n%s", command, commandHardwareConfigExample, code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Usage: ubuntu-vm-template-builder "+command+" "+commandHardwareConfigExample) {
+				t.Fatalf("nested help output is unexpected:\n%s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestPrerequisiteCommandsAreNestedUnderBackends(t *testing.T) {
+	for _, command := range []string{"qemu", "vcenter"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"ubuntu-vm-template-builder", command, commandPrerequisites, "--help"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("%s %s --help exit code = %d, stderr:\n%s", command, commandPrerequisites, code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Usage: ubuntu-vm-template-builder "+command+" "+commandPrerequisites) {
+				t.Fatalf("nested prerequisites help output is unexpected:\n%s", stdout.String())
+			}
+		})
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ubuntu-vm-template-builder", commandPrerequisites}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("top-level prerequisites command returned success")
+	}
+	if !strings.Contains(stderr.String(), `unknown command "prerequisites"`) {
+		t.Fatalf("top-level prerequisites error is unexpected:\n%s", stderr.String())
+	}
+}
+
+func TestPrerequisiteCollectorsAreBackendSpecific(t *testing.T) {
+	qemuReport := collectQEMUPrerequisites()
+	if !prerequisiteNamesContain(qemuReport, "qemu-system-x86_64") {
+		t.Fatalf("QEMU prerequisites missing qemu-system-x86_64: %+v", qemuReport.Items)
+	}
+	if prerequisiteNamesContain(qemuReport, "xorriso") {
+		t.Fatalf("QEMU prerequisites unexpectedly include xorriso: %+v", qemuReport.Items)
+	}
+	for _, input := range qemuReport.InputPrerequisites {
+		if strings.Contains(strings.ToLower(input), "vcenter") {
+			t.Fatalf("QEMU input prerequisite mentions vCenter: %q", input)
+		}
+	}
+
+	vcenterReport := collectVCenterPrerequisites()
+	if !prerequisiteNamesContain(vcenterReport, "xorriso") {
+		t.Fatalf("vCenter prerequisites missing xorriso: %+v", vcenterReport.Items)
+	}
+	for _, disallowed := range []string{"qemu-system-x86_64", "qemu-img", "OVMF UEFI firmware", "/dev/kvm access"} {
+		if prerequisiteNamesContain(vcenterReport, disallowed) {
+			t.Fatalf("vCenter prerequisites unexpectedly include %s: %+v", disallowed, vcenterReport.Items)
+		}
+	}
+}
+
+func prerequisiteNamesContain(report prerequisiteReport, name string) bool {
+	for _, item := range report.Items {
+		if item.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestHardwareConfigExampleRejectsExtraArgs(t *testing.T) {
+	for _, command := range []string{"qemu", "vcenter"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"ubuntu-vm-template-builder", command, commandHardwareConfigExample, "extra"}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("%s %s returned success with extra argument", command, commandHardwareConfigExample)
+			}
+			if !strings.Contains(stderr.String(), "does not accept arguments") {
+				t.Fatalf("extra arg error is unexpected:\n%s", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunQEMURequiresImage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ubuntu-vm-template-builder",
+		"qemu",
+		"build",
+		"--iso", "ubuntu.iso",
+		"--user-data", "autoinstall.yaml",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("qemu command returned success without --image")
+	}
+	if !strings.Contains(stderr.String(), "--image") {
+		t.Fatalf("qemu missing flag error does not mention --image:\n%s", stderr.String())
+	}
+}
+
+func TestRunQEMURequiresDiskSizeFromHardwareConfig(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ubuntu-vm-template-builder",
+		"qemu",
+		"build",
+		"--iso", "ubuntu.iso",
+		"--image", "output.img",
+		"--user-data", "autoinstall.yaml",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("qemu command returned success without disk_size")
+	}
+	if !strings.Contains(stderr.String(), "disk_size") {
+		t.Fatalf("qemu missing disk_size error does not mention disk_size:\n%s", stderr.String())
+	}
+}
+
+func TestRunQEMURejectsDiskSizeFlag(t *testing.T) {
+	for _, command := range []string{"qemu", "vcenter"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{
+				"ubuntu-vm-template-builder",
+				command,
+				"build",
+				"--disk-size", "20G",
+			}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("%s command returned success with removed --disk-size flag", command)
+			}
+			if !strings.Contains(stderr.String(), "flag provided but not defined") {
+				t.Fatalf("%s --disk-size error is unexpected:\n%s", command, stderr.String())
+			}
+		})
+	}
+}
+
+func TestBackendDirectBuildSyntaxIsRejected(t *testing.T) {
+	tests := []struct {
+		command string
+		flag    string
+	}{
+		{command: "qemu", flag: "--iso"},
+		{command: "vcenter", flag: "--iso"},
+	}
+	for _, test := range tests {
+		t.Run(test.command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"ubuntu-vm-template-builder", test.command, test.flag, "ubuntu.iso"}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("%s direct build syntax returned success", test.command)
+			}
+			if !strings.Contains(stderr.String(), "unknown "+test.command+" command") {
+				t.Fatalf("%s direct build error is unexpected:\n%s", test.command, stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunVCenterDoesNotRequireImage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ubuntu-vm-template-builder",
+		"vcenter",
+		"build",
+		"--iso", "ubuntu.iso",
+		"--user-data", "autoinstall.yaml",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("vcenter command returned success without placement flags")
+	}
+	errOutput := stderr.String()
+	for _, want := range []string{"--vcenter-datacenter", "--vcenter-datastore", "--vcenter-esxi-host", "--vcenter-folder", "--vcenter-host"} {
+		if !strings.Contains(errOutput, want) {
+			t.Fatalf("vcenter missing flag error does not mention %s:\n%s", want, errOutput)
+		}
+	}
+	firstLine := strings.SplitN(errOutput, "\n", 2)[0]
+	if strings.Contains(firstLine, "--vcenter-network") {
+		t.Fatalf("vcenter missing flag error should allow network from hardware config:\n%s", errOutput)
+	}
+	if strings.Contains(errOutput, "--image") {
+		t.Fatalf("vcenter missing flag error should not require --image:\n%s", errOutput)
+	}
+}
+
+func TestRunVCenterRequiresNetworkFromFlagOrHardwareConfig(t *testing.T) {
+	hardwareConfigPath := writeTempHardwareConfig(t, "disk_size: 20G\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ubuntu-vm-template-builder",
+		"vcenter",
+		"build",
+		"--iso", "ubuntu.iso",
+		"--user-data", "autoinstall.yaml",
+		"--hardware-config", hardwareConfigPath,
+		"--vcenter-host", "vc.example.com",
+		"--vcenter-username", "administrator@vsphere.local",
+		"--vcenter-password", "secret",
+		"--vcenter-datacenter", "DC0",
+		"--vcenter-esxi-host", "esxi.example.com",
+		"--vcenter-datastore", "datastore1",
+		"--vcenter-folder", "vm",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("vcenter command returned success without network")
+	}
+	if !strings.Contains(stderr.String(), "pass --vcenter-network or set vcenter.network") {
+		t.Fatalf("network error is unexpected:\n%s", stderr.String())
+	}
+}
+
+func TestRunVCenterAcceptsNetworkFromHardwareConfig(t *testing.T) {
+	hardwareConfigPath := writeTempHardwareConfig(t, "disk_size: 20G\nvcenter:\n  network: VM Network\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ubuntu-vm-template-builder",
+		"vcenter",
+		"build",
+		"--iso", "ubuntu.iso",
+		"--user-data", "autoinstall.yaml",
+		"--hardware-config", hardwareConfigPath,
+		"--vcenter-host", "vc.example.com",
+		"--vcenter-username", "administrator@vsphere.local",
+		"--vcenter-password", "secret",
+		"--vcenter-datacenter", "DC0",
+		"--vcenter-esxi-host", "esxi.example.com",
+		"--vcenter-datastore", "datastore1",
+		"--vcenter-folder", "vm",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("vcenter command unexpectedly reached success with placeholder files")
+	}
+	if strings.Contains(stderr.String(), "pass --vcenter-network or set vcenter.network") {
+		t.Fatalf("vcenter did not accept hardware config network:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "read user-data file") {
+		t.Fatalf("vcenter should proceed past network validation to user-data loading:\n%s", stderr.String())
+	}
+}
+
+func TestEffectiveVCenterNetworkPrefersCLI(t *testing.T) {
+	hardware := common.DefaultHardwareConfig()
+	hardware.DiskSize = "20G"
+	hardware.VCenter.Network = "YAML Network"
+
+	if got := effectiveVCenterNetwork(" CLI Network ", hardware); got != "CLI Network" {
+		t.Fatalf("effectiveVCenterNetwork with CLI = %q, want CLI Network", got)
+	}
+	if got := effectiveVCenterNetwork("", hardware); got != "YAML Network" {
+		t.Fatalf("effectiveVCenterNetwork without CLI = %q, want YAML Network", got)
+	}
+}
+
+func TestRequiredFlagErrorsSorted(t *testing.T) {
+	got := requiredFlagErrors(map[string]string{
+		"zeta":  "",
+		"alpha": "",
+		"ok":    "value",
+	})
+	want := []string{"--alpha", "--zeta"}
+	if len(got) != len(want) {
+		t.Fatalf("requiredFlagErrors = %v, want %v", got, want)
+	}
+	for idx := range want {
+		if got[idx] != want[idx] {
+			t.Fatalf("requiredFlagErrors = %v, want %v", got, want)
 		}
 	}
 }
@@ -493,7 +429,8 @@ func TestPrerequisiteReportRequiredOK(t *testing.T) {
 
 func TestPrintPrerequisiteReportIncludesSuggestions(t *testing.T) {
 	report := prerequisiteReport{
-		OS: OSInfo{GOOS: "linux", ID: "debian", Name: "Debian"},
+		Backend: "QEMU",
+		OS:      qemu.OSInfo{GOOS: "linux", ID: "debian", Name: "Debian"},
 		Items: []prerequisiteItem{
 			{
 				Name:        "qemu-system-x86_64",
@@ -504,6 +441,7 @@ func TestPrintPrerequisiteReportIncludesSuggestions(t *testing.T) {
 				Suggestion:  "sudo apt install qemu-system-x86",
 			},
 		},
+		InputPrerequisites: []string{"hardware config YAML with disk_size"},
 	}
 
 	var out bytes.Buffer
@@ -511,10 +449,12 @@ func TestPrintPrerequisiteReportIncludesSuggestions(t *testing.T) {
 	output := out.String()
 
 	for _, want := range []string{
+		"QEMU prerequisites",
 		"[MISSING] qemu-system-x86_64 (required)",
 		"Fix: sudo apt install qemu-system-x86",
-		"Install input prerequisites checked during normal install runs:",
-		"One or more required host prerequisites are missing.",
+		"QEMU install input prerequisites checked during normal install runs:",
+		"hardware config YAML with disk_size",
+		"One or more required QEMU host prerequisites are missing.",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("prerequisite report missing %q in:\n%s", want, output)
@@ -522,18 +462,72 @@ func TestPrintPrerequisiteReportIncludesSuggestions(t *testing.T) {
 	}
 }
 
-func TestPrintUsageMentionsPrerequisitesCommand(t *testing.T) {
+func TestPrintUsageMentionsBackendCommands(t *testing.T) {
 	var out bytes.Buffer
 	printUsage(&out, "ubuntu-vm-template-builder")
 	output := out.String()
 
-	if !strings.Contains(output, "ubuntu-vm-template-builder prerequisites") {
-		t.Fatalf("usage does not mention prerequisites command:\n%s", output)
+	for _, want := range []string{
+		"Usage: ubuntu-vm-template-builder <command>",
+		"qemu",
+		"vcenter",
+		"Run ubuntu-vm-template-builder <command> --help",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("usage missing %q in:\n%s", want, output)
+		}
 	}
-	if !strings.Contains(output, "Aliases: prereqs, prerequests, prequests") {
-		t.Fatalf("usage does not mention prerequisites aliases:\n%s", output)
+	if strings.Contains(output, "--backend") {
+		t.Fatalf("usage still mentions removed --backend flag:\n%s", output)
 	}
-	if !strings.Contains(output, "--boot-mode string") {
-		t.Fatalf("usage does not mention boot mode flag:\n%s", output)
+	if strings.Contains(output, "prerequisites") {
+		t.Fatalf("top-level usage should not mention prerequisites:\n%s", output)
 	}
+}
+
+func TestCommandUsageMentionsHardwareConfig(t *testing.T) {
+	var out bytes.Buffer
+	printQEMUUsage(&out, "ubuntu-vm-template-builder")
+	if output := out.String(); !strings.Contains(output, commandBuild) || strings.Contains(output, "--hardware-config") || strings.Contains(output, "--boot-mode") {
+		t.Fatalf("qemu backend usage should mention build command and not build flags:\n%s", output)
+	}
+
+	out.Reset()
+	printQEMUBuildUsage(&out, "ubuntu-vm-template-builder")
+	if output := out.String(); !strings.Contains(output, "--hardware-config") || !strings.Contains(output, "qemu build") || strings.Contains(output, "--boot-mode") || strings.Contains(output, "--disk-size") {
+		t.Fatalf("qemu build usage should mention --hardware-config and not removed flags:\n%s", output)
+	}
+
+	out.Reset()
+	printVCenterUsage(&out, "ubuntu-vm-template-builder")
+	if output := out.String(); !strings.Contains(output, commandBuild) || strings.Contains(output, "--hardware-config") || strings.Contains(output, "--vm-cpu") || strings.Contains(output, "--vm-memory-mb") {
+		t.Fatalf("vcenter backend usage should mention build command and not build flags:\n%s", output)
+	}
+
+	out.Reset()
+	printVCenterBuildUsage(&out, "ubuntu-vm-template-builder")
+	if output := out.String(); !strings.Contains(output, "--hardware-config") || !strings.Contains(output, "vcenter build") || strings.Contains(output, "--disk-size") || strings.Contains(output, "--vm-cpu") || strings.Contains(output, "--vm-memory-mb") {
+		t.Fatalf("vcenter build usage should mention --hardware-config and not removed hardware flags:\n%s", output)
+	}
+}
+
+func loadHardwareConfigExampleOutput(t *testing.T, output string) common.HardwareConfig {
+	t.Helper()
+
+	path := writeTempHardwareConfig(t, output)
+	cfg, err := common.LoadHardwareConfig(path)
+	if err != nil {
+		t.Fatalf("LoadHardwareConfig rejected example output: %v\n%s", err, output)
+	}
+	return cfg
+}
+
+func writeTempHardwareConfig(t *testing.T, data string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "hardware.yaml")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write hardware config: %v", err)
+	}
+	return path
 }

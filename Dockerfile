@@ -25,6 +25,7 @@ RUN apt-get update \
         ovmf \
         qemu-system-x86 \
         qemu-utils \
+        xorriso \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/ubuntu-vm-template-builder /usr/local/bin/ubuntu-vm-template-builder

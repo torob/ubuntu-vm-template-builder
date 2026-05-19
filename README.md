@@ -1,11 +1,15 @@
 # Ubuntu VM Template Builder
 
-Builds reproducible Ubuntu VM template disk images in QEMU using a cloud-init
-autoinstall file that you provide directly.
+Builds reproducible Ubuntu VM template disk images in QEMU, or vCenter VMs and
+templates directly on ESXi hardware, using a cloud-init autoinstall file that you
+provide directly.
 
-The tool creates a NoCloud seed ISO containing your `user-data`, creates the
-destination disk image, extracts the Ubuntu ISO kernel and initrd, and boots QEMU
-with `autoinstall ---`.
+The `qemu` command creates a NoCloud seed ISO containing your `user-data`,
+creates the destination disk image, extracts the Ubuntu ISO kernel and initrd,
+and boots QEMU with `autoinstall ---`. The `vcenter` command
+remasters the Ubuntu ISO with NoCloud seed data, boots a temporary VM on the
+selected ESXi host, waits for the installer to power off, and leaves the guest
+as a VM or converts it to a vCenter template.
 
 It is intended to make Ubuntu VM template creation faster and repeatable: keep
 the autoinstall cloud-config in version control, run the builder, and import the
@@ -16,8 +20,9 @@ resulting image into your virtualization platform as a template.
 - Go 1.26 or newer
 - `qemu-system-x86_64`
 - `qemu-img` when creating `qcow2` or `vmdk` images
-- OVMF UEFI firmware for the default `--boot-mode uefi`
+- OVMF UEFI firmware for the default `boot_firmware: uefi` hardware config
 - Accessible `/dev/kvm`, because QEMU is launched with `--enable-kvm`
+- `xorriso` when using the `vcenter` command
 - An Ubuntu live-server ISO containing `/casper/vmlinuz` and `/casper/initrd`
 
 ## Usage
@@ -25,21 +30,24 @@ resulting image into your virtualization platform as a template.
 Check host prerequisites:
 
 ```bash
-./ubuntu-vm-template-builder prerequisites
+./ubuntu-vm-template-builder qemu prerequisites
+./ubuntu-vm-template-builder vcenter prerequisites
 ```
 
-Aliases are `prereqs`, `prerequests`, and `prequests`. The command prints the
-host requirements it checks and suggests OS-specific install or permission fixes
-for missing requirements.
+Aliases under each backend are `prereqs`, `prerequests`, and `prequests`. Each
+command prints only the host requirements for that backend and suggests
+OS-specific install or permission fixes for missing requirements.
 
-Run an install:
+Run a QEMU install:
 
 ```bash
 go run . \
+  qemu \
+  build \
   --iso /path/to/ubuntu-24.04.3-live-server-amd64.iso \
   --image /path/to/output.img \
-  --disk-size 20G \
-  --user-data autoinstall.uefi.example.yaml
+  --user-data autoinstall.uefi.example.yaml \
+  --hardware-config hardware.qemu.yaml
 ```
 
 Build a binary:
@@ -51,13 +59,103 @@ go build -o ubuntu-vm-template-builder .
 Then run:
 
 ```bash
-./ubuntu-vm-template-builder \
+./ubuntu-vm-template-builder qemu \
+  build \
   --iso /path/to/ubuntu-24.04.3-live-server-amd64.iso \
   --image /path/to/output.img \
-  --disk-size 20G \
-  --boot-mode uefi \
   --disk-format raw \
-  --user-data autoinstall.uefi.example.yaml
+  --user-data autoinstall.uefi.example.yaml \
+  --hardware-config hardware.qemu.yaml
+```
+
+Build a vCenter VM or template:
+
+```bash
+./ubuntu-vm-template-builder vcenter \
+  build \
+  --iso /path/to/ubuntu-24.04.3-live-server-amd64.iso \
+  --user-data autoinstall.uefi.example.yaml \
+  --hardware-config hardware.vcenter.yaml \
+  --vcenter-host vc.example.com \
+  --vcenter-username administrator@vsphere.local \
+  --vcenter-password 'secret' \
+  --vcenter-insecure \
+  --vcenter-datacenter DC0 \
+  --vcenter-esxi-host esxi-01.example.com \
+  --vcenter-datastore datastore1 \
+  --vcenter-folder /DC0/vm/Templates \
+  --vcenter-network 'VM Network' \
+  --template-name ubuntu-24.04-template
+```
+
+For `vcenter`, `--image` is not used. The output is a remote vCenter VM or
+template, named by `--template-name`, or by the hostname in `--user-data` when
+`--template-name` is omitted. During installation the vCenter backend streams
+the guest console through a temporary datastore-backed serial log file; the log
+file is deleted after the VM/template is created successfully and left in place
+on failure for debugging.
+
+Available backend commands are currently `qemu` and `vcenter`. Each backend
+provides `build`, `prerequisites`, and `hardware-config-example`. A `proxmox`
+command is intentionally not implemented yet.
+
+## Hardware Config
+
+Hardware settings are configured with `--hardware-config hardware.yaml`.
+`disk_size` is required. Other common/backend keys default when omitted from the
+file.
+
+```yaml
+boot_firmware: uefi
+disk_size: 20G
+vcpu: 2
+memory_mb: 2048
+qemu:
+  cpu_model: host
+  disk_interface: virtio
+  iso_interface: virtio
+vcenter:
+  scsi_controller: pvscsi
+  network_adapter: vmxnet3
+  network: VM Network
+  disk_provisioning: thick_provision_lazy_zeroed
+  reserve_all_guest_memory: false
+  output_type: template
+```
+
+Print a complete backend-specific example:
+
+```bash
+./ubuntu-vm-template-builder qemu hardware-config-example > hardware.qemu.yaml
+./ubuntu-vm-template-builder vcenter hardware-config-example > hardware.vcenter.yaml
+```
+
+Common keys are `boot_firmware`, `disk_size`, `vcpu`, and `memory_mb`.
+Backend-specific keys live under `qemu` and `vcenter`. Supported boot firmware
+values are `uefi` and `bios`; UEFI is the default. Use `boot_firmware: bios` if
+the host does not have OVMF installed or you need a BIOS-installed image.
+
+For vCenter, the target network can be set as `vcenter.network` in the hardware
+config or with `--vcenter-network`; the CLI flag overrides the config value.
+Set `vcenter.output_type: vm` to leave the installed guest as a powered-off VM
+instead of converting it to a template. The default is `template`.
+
+Example:
+
+```yaml
+# hardware.bios.yaml
+boot_firmware: bios
+disk_size: 20G
+```
+
+```bash
+./ubuntu-vm-template-builder qemu \
+  build \
+  --iso /path/to/ubuntu.iso \
+  --image /path/to/output.img \
+  --disk-format raw \
+  --user-data autoinstall.bios.example.yaml \
+  --hardware-config hardware.bios.yaml
 ```
 
 Build and run with Docker:
@@ -66,7 +164,8 @@ Build and run with Docker:
 docker build -t ubuntu-vm-template-builder .
 ```
 
-The image includes the compiled builder, QEMU, `qemu-img`, and OVMF firmware.
+The image includes the compiled builder, QEMU, `qemu-img`, OVMF firmware, and
+`xorriso`.
 It still needs access to the host KVM device, and input/output paths must be
 mounted into the container. This example mounts the current directory at
 `/work` and writes the output image as your host user:
@@ -78,37 +177,24 @@ docker run --rm \
   --group-add "$(stat -c %g /dev/kvm)" \
   -v "$PWD:/work" \
   ubuntu-vm-template-builder \
+  qemu \
+  build \
   --iso /work/ubuntu-24.04.3-live-server-amd64.iso \
   --image /work/output.img \
-  --disk-size 20G \
-  --boot-mode uefi \
   --disk-format raw \
-  --user-data /work/autoinstall.uefi.example.yaml
+  --user-data /work/autoinstall.uefi.example.yaml \
+  --hardware-config /work/hardware.qemu.yaml
 ```
 
 You can also check the container runtime prerequisites:
 
 ```bash
-docker run --rm --device /dev/kvm ubuntu-vm-template-builder prerequisites
+docker run --rm --device /dev/kvm ubuntu-vm-template-builder qemu prerequisites
 ```
 
-For a BIOS-installed image, use the BIOS example and select BIOS explicitly:
-
-```bash
-./ubuntu-vm-template-builder \
-  --iso /path/to/ubuntu-24.04.3-live-server-amd64.iso \
-  --image /path/to/output.img \
-  --disk-size 20G \
-  --boot-mode bios \
-  --disk-format raw \
-  --user-data autoinstall.bios.example.yaml
-```
-
-Supported disk formats are `raw`, `qcow2`, and `vmdk`.
-Supported boot modes are `uefi` and `bios`; `uefi` is the default. Use
-`--boot-mode bios` if the host does not have OVMF installed or you need a BIOS
-installed image. UEFI installs use a temporary OVMF variables file during QEMU
-installation; the disk image is the only persistent output file.
+Supported QEMU disk formats are `raw`, `qcow2`, and `vmdk`.
+UEFI installs use a temporary OVMF variables file during QEMU installation; the
+disk image is the only persistent output file.
 
 ## Releases
 
@@ -175,12 +261,12 @@ keys, networking, storage, locale, and timezone.
 The program validates that the file is readable, non-empty, valid YAML, and has a
 top-level `autoinstall` mapping before creating any disk image.
 
-For `--boot-mode uefi`, the program also validates that the user-data can create
-a portable single-file image. If you provide a custom `storage.config`, it must
-define a GPT EFI System Partition formatted as FAT and mounted at `/boot/efi`.
-The user-data must also include a fallback UEFI bootloader late-command, such as
-`grub-install --removable`, so the disk does not depend on QEMU's temporary UEFI
-NVRAM state.
+For `boot_firmware: uefi`, the QEMU command also validates that the user-data can
+create a portable single-file image. If you provide a custom `storage.config`,
+it must define a GPT EFI System Partition formatted as FAT and mounted at
+`/boot/efi`. The user-data must also include a fallback UEFI bootloader
+late-command, such as `grub-install --removable`, so the disk does not depend on
+QEMU's temporary UEFI NVRAM state.
 
 See `autoinstall.uefi.example.yaml` for the UEFI example and
 `autoinstall.bios.example.yaml` for the BIOS example.

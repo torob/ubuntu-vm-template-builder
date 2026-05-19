@@ -796,15 +796,23 @@ func (r matrixRunner) runCase(parent context.Context, testCase matrixCase) caseR
 		return r.finishCase(result.withDuration(start))
 	}
 
+	hardwareConfigPath := filepath.Join(caseDir, "hardware.yaml")
+	hardwareConfig := fmt.Sprintf("boot_firmware: %s\ndisk_size: %s\n", testCase.BootMode, r.Config.DiskSize)
+	if err := os.WriteFile(hardwareConfigPath, []byte(hardwareConfig), 0o644); err != nil {
+		result.Err = fmt.Errorf("write hardware config: %w", err)
+		return r.finishCase(result.withDuration(start))
+	}
+
 	imagePath := filepath.Join(caseDir, "image."+testCase.DiskFormat)
 	installCtx, cancelInstall := context.WithTimeout(parent, installTimeout)
 	installArgs := []string{
+		"qemu",
+		"build",
 		"--iso", testCase.ISOPath,
 		"--image", imagePath,
-		"--disk-size", r.Config.DiskSize,
 		"--user-data", userDataPath,
 		"--disk-format", testCase.DiskFormat,
-		"--boot-mode", testCase.BootMode,
+		"--hardware-config", hardwareConfigPath,
 	}
 	r.printf("[%s] installing image; log: %s\n", testCase.ID(), filepath.Join(caseDir, "install.log"))
 	err = runLoggedCommand(installCtx, caseDir, filepath.Join(caseDir, "install.log"), r.InstallerPath, installArgs...)
