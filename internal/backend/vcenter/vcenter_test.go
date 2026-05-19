@@ -16,6 +16,7 @@ import (
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/simulator"
 	"github.com/vmware/govmomi/vim25"
+	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 	"gopkg.in/yaml.v3"
 
@@ -491,6 +492,93 @@ func TestVMConfigUsesRequestedHardware(t *testing.T) {
 	})
 }
 
+func TestBuildPostInstallDeviceSpecDisconnectsInstallerDevicesAndBootsDiskOnly(t *testing.T) {
+	runVPXSimulator(t, func(ctx context.Context, client *vim25.Client) {
+		cfg := simulatorVCenterConfig("post-install-spec")
+		placement, err := ResolvePlacement(ctx, client, cfg.VCenter)
+		if err != nil {
+			t.Fatalf("ResolvePlacement returned error: %v", err)
+		}
+		installSpec, err := BuildVMConfig(ctx, cfg, placement, placement.Datastore.Path("installer.iso"), placement.Datastore.Path("installer-console.log"), 20*1024*1024*1024)
+		if err != nil {
+			t.Fatalf("BuildVMConfig returned error: %v", err)
+		}
+		devices := devicesFromConfigSpec(t, installSpec)
+		disk := firstDiskDevice(devices)
+		if disk == nil {
+			t.Fatal("install spec missing disk")
+		}
+
+		finalSpec, err := buildPostInstallDeviceSpec(devices)
+		if err != nil {
+			t.Fatalf("buildPostInstallDeviceSpec returned error: %v", err)
+		}
+
+		assertDiskOnlyBootOrder(t, finalSpec.BootOptions, disk.Key)
+		cdrom, ok := findDeviceChange[*types.VirtualCdrom](finalSpec)
+		if !ok {
+			t.Fatalf("post-install spec missing CDROM edit: %#v", finalSpec.DeviceChange)
+		}
+		if _, ok := cdrom.Backing.(*types.VirtualCdromIsoBackingInfo); ok {
+			t.Fatalf("CDROM still has ISO backing: %#v", cdrom.Backing)
+		}
+		assertDeviceDisconnected(t, cdrom.GetVirtualDevice(), "CDROM")
+
+		serial, ok := findDeviceChange[*types.VirtualSerialPort](finalSpec)
+		if !ok {
+			t.Fatalf("post-install spec missing serial edit: %#v", finalSpec.DeviceChange)
+		}
+		assertDeviceDisconnected(t, serial.GetVirtualDevice(), "serial")
+	})
+}
+
+func TestFinalizePostInstallDevicesInSimulator(t *testing.T) {
+	runVPXSimulator(t, func(ctx context.Context, client *vim25.Client) {
+		cfg := simulatorVCenterConfig("post-install-finalize")
+		placement, err := ResolvePlacement(ctx, client, cfg.VCenter)
+		if err != nil {
+			t.Fatalf("ResolvePlacement returned error: %v", err)
+		}
+		vm, err := createSimulatorVM(ctx, client, cfg, placement)
+		if err != nil {
+			t.Fatalf("create simulator VM: %v", err)
+		}
+
+		if err := finalizePostInstallDevices(ctx, vm); err != nil {
+			t.Fatalf("finalizePostInstallDevices returned error: %v", err)
+		}
+
+		devices, err := vm.Device(ctx)
+		if err != nil {
+			t.Fatalf("read VM devices after finalization: %v", err)
+		}
+		disk := firstDiskDevice(devices)
+		if disk == nil {
+			t.Fatal("finalized VM missing disk")
+		}
+		for _, device := range devices.SelectByType((*types.VirtualCdrom)(nil)) {
+			cdrom := device.(*types.VirtualCdrom)
+			if _, ok := cdrom.Backing.(*types.VirtualCdromIsoBackingInfo); ok {
+				t.Fatalf("finalized CDROM still has ISO backing: %#v", cdrom.Backing)
+			}
+			assertDeviceDisconnected(t, cdrom.GetVirtualDevice(), "CDROM")
+		}
+		for _, device := range devices.SelectByType((*types.VirtualSerialPort)(nil)) {
+			serial := device.(*types.VirtualSerialPort)
+			assertDeviceDisconnected(t, serial.GetVirtualDevice(), "serial")
+		}
+
+		var vmMO mo.VirtualMachine
+		if err := vm.Properties(ctx, vm.Reference(), []string{"config.bootOptions"}, &vmMO); err != nil {
+			t.Fatalf("read VM boot options: %v", err)
+		}
+		if vmMO.Config == nil {
+			t.Fatal("VM config was nil after reading boot options")
+		}
+		assertDiskOnlyBootOrder(t, vmMO.Config.BootOptions, disk.Key)
+	})
+}
+
 func TestVMConfigSupportsVCenterDiskProvisioningTypes(t *testing.T) {
 	runVPXSimulator(t, func(ctx context.Context, client *vim25.Client) {
 		placement, err := ResolvePlacement(ctx, client, simulatorVCenterConfig("placement").VCenter)
@@ -722,6 +810,49 @@ func assertDatastoreFileMissing(t *testing.T, ctx context.Context, datastore *ob
 	}
 	if !isMissingDatastoreFile(err) {
 		t.Fatalf("datastore file %q download error = %v, want missing file error", remotePath, err)
+	}
+}
+
+func devicesFromConfigSpec(t *testing.T, spec types.VirtualMachineConfigSpec) object.VirtualDeviceList {
+	t.Helper()
+	var devices object.VirtualDeviceList
+	for _, change := range spec.DeviceChange {
+		device := change.GetVirtualDeviceConfigSpec().Device
+		if device == nil {
+			t.Fatalf("device change has nil device: %#v", change)
+		}
+		devices = append(devices, device)
+	}
+	return devices
+}
+
+func assertDeviceDisconnected(t *testing.T, device *types.VirtualDevice, label string) {
+	t.Helper()
+	if device.Connectable == nil {
+		t.Fatalf("%s connectable is nil, want disconnected flags", label)
+	}
+	if device.Connectable.Connected {
+		t.Fatalf("%s Connected = true, want false", label)
+	}
+	if device.Connectable.StartConnected {
+		t.Fatalf("%s StartConnected = true, want false", label)
+	}
+}
+
+func assertDiskOnlyBootOrder(t *testing.T, bootOptions *types.VirtualMachineBootOptions, diskKey int32) {
+	t.Helper()
+	if bootOptions == nil {
+		t.Fatal("BootOptions = nil")
+	}
+	if len(bootOptions.BootOrder) != 1 {
+		t.Fatalf("BootOrder length = %d, want 1: %#v", len(bootOptions.BootOrder), bootOptions.BootOrder)
+	}
+	bootDisk, ok := bootOptions.BootOrder[0].(*types.VirtualMachineBootOptionsBootableDiskDevice)
+	if !ok {
+		t.Fatalf("BootOrder[0] = %T, want disk boot device", bootOptions.BootOrder[0])
+	}
+	if bootDisk.DeviceKey != diskKey {
+		t.Fatalf("BootOrder disk key = %d, want %d", bootDisk.DeviceKey, diskKey)
 	}
 }
 

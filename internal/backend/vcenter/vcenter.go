@@ -222,7 +222,7 @@ func (i *Installer) Install() bool {
 		return false
 	}
 
-	if err := detachInstallerISO(ctx, vm); err != nil {
+	if err := finalizePostInstallDevices(ctx, vm); err != nil {
 		fmt.Printf("vCenter installation failed for %s: %v\n", i.cfg.DisplayName, err)
 		return false
 	}
@@ -897,26 +897,75 @@ func powerOnAndWaitForInstaller(ctx context.Context, vm *object.VirtualMachine, 
 	return nil
 }
 
-func detachInstallerISO(ctx context.Context, vm *object.VirtualMachine) error {
-	fmt.Println("Detaching installer ISO from VM...")
+func finalizePostInstallDevices(ctx context.Context, vm *object.VirtualMachine) error {
+	fmt.Println("Finalizing post-install VM devices and boot order...")
 	devices, err := vm.Device(ctx)
 	if err != nil {
 		return fmt.Errorf("read VM devices: %w", err)
 	}
-	cdrom, err := devices.FindCdrom("")
+	spec, err := buildPostInstallDeviceSpec(devices)
 	if err != nil {
 		return err
 	}
-	devices.EjectIso(cdrom)
-	if cdrom.Connectable != nil {
-		cdrom.Connectable.Connected = false
-		cdrom.Connectable.StartConnected = false
+	task, err := vm.Reconfigure(ctx, spec)
+	if err != nil {
+		return fmt.Errorf("finalize post-install devices: %w", err)
 	}
-	if err := vm.EditDevice(ctx, cdrom); err != nil {
-		return fmt.Errorf("detach installer ISO: %w", err)
+	if err := task.Wait(ctx); err != nil {
+		return fmt.Errorf("wait for post-install device finalization: %w", err)
 	}
-	fmt.Println("OK installer ISO detached")
+	fmt.Println("OK post-install VM devices finalized")
 	return nil
+}
+
+func buildPostInstallDeviceSpec(devices object.VirtualDeviceList) (types.VirtualMachineConfigSpec, error) {
+	diskDevice := firstDiskDevice(devices)
+	if diskDevice == nil {
+		return types.VirtualMachineConfigSpec{}, errors.New("no virtual disk found for final boot order")
+	}
+
+	var editedDevices object.VirtualDeviceList
+	for _, device := range devices.SelectByType((*types.VirtualCdrom)(nil)) {
+		cdrom := device.(*types.VirtualCdrom)
+		devices.EjectIso(cdrom)
+		disconnectDevice(cdrom.GetVirtualDevice())
+		editedDevices = append(editedDevices, cdrom)
+	}
+	for _, device := range devices.SelectByType((*types.VirtualSerialPort)(nil)) {
+		serial := device.(*types.VirtualSerialPort)
+		disconnectDevice(serial.GetVirtualDevice())
+		editedDevices = append(editedDevices, serial)
+	}
+
+	deviceChange, err := editedDevices.ConfigSpec(types.VirtualDeviceConfigSpecOperationEdit)
+	if err != nil {
+		return types.VirtualMachineConfigSpec{}, err
+	}
+
+	return types.VirtualMachineConfigSpec{
+		BootOptions: &types.VirtualMachineBootOptions{
+			BootOrder: []types.BaseVirtualMachineBootOptionsBootableDevice{
+				&types.VirtualMachineBootOptionsBootableDiskDevice{DeviceKey: diskDevice.Key},
+			},
+		},
+		DeviceChange: deviceChange,
+	}, nil
+}
+
+func firstDiskDevice(devices object.VirtualDeviceList) *types.VirtualDisk {
+	disks := devices.SelectByType((*types.VirtualDisk)(nil))
+	if len(disks) == 0 {
+		return nil
+	}
+	return disks[0].(*types.VirtualDisk)
+}
+
+func disconnectDevice(device *types.VirtualDevice) {
+	if device.Connectable == nil {
+		device.Connectable = &types.VirtualDeviceConnectInfo{}
+	}
+	device.Connectable.Connected = false
+	device.Connectable.StartConnected = false
 }
 
 func applyFinalHardware(ctx context.Context, vm *object.VirtualMachine, cfg Config) error {
