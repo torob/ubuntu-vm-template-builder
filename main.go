@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ const (
 	commandQEMU                  = "qemu"
 	commandVCenter               = "vcenter"
 	commandBuild                 = "build"
+	commandUpload                = "upload"
 	commandPrerequisites         = "prerequisites"
 	commandHardwareConfigExample = "hardware-config-example"
 )
@@ -188,6 +190,8 @@ func runVCenter(program string, args []string, stdout, stderr io.Writer) int {
 		return 0
 	case commandBuild:
 		return runVCenterBuild(program, args[1:], stdout, stderr)
+	case commandUpload:
+		return runVCenterUpload(program, args[1:], stdout, stderr)
 	case commandHardwareConfigExample:
 		return runHardwareConfigExampleCommand(program, commandVCenter, args[1:], stdout, stderr, printVCenterHardwareConfigExample)
 	case commandPrerequisites, "prereqs", "prerequests", "prequests":
@@ -321,6 +325,79 @@ func runVCenterBuild(program string, args []string, stdout, stderr io.Writer) in
 	return 1
 }
 
+func runVCenterUpload(program string, args []string, stdout, stderr io.Writer) int {
+	var (
+		sourcePath        string
+		destinationPath   string
+		overwrite         bool
+		vcenterHost       string
+		vcenterUsername   string
+		vcenterPassword   string
+		vcenterInsecure   bool
+		vcenterDatacenter string
+		vcenterESXiHost   string
+		vcenterDatastore  string
+	)
+
+	fs := flag.NewFlagSet(commandVCenter+" "+commandUpload, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.StringVar(&sourcePath, "source", "", "Local source file path")
+	fs.StringVar(&destinationPath, "destination", "", "Datastore-relative destination path")
+	fs.BoolVar(&overwrite, "overwrite", false, "Overwrite destination file if it already exists")
+	fs.StringVar(&vcenterHost, "vcenter-host", "", "vCenter hostname or URL")
+	fs.StringVar(&vcenterUsername, "vcenter-username", "", "vCenter username")
+	fs.StringVar(&vcenterPassword, "vcenter-password", "", "vCenter password")
+	fs.BoolVar(&vcenterInsecure, "vcenter-insecure", false, "Skip vCenter TLS certificate verification")
+	fs.StringVar(&vcenterDatacenter, "vcenter-datacenter", "", "vCenter datacenter name or inventory path")
+	fs.StringVar(&vcenterESXiHost, "vcenter-esxi-host", "", "ESXi host name or inventory path")
+	fs.StringVar(&vcenterDatastore, "vcenter-datastore", "", "Datastore name or inventory path")
+	fs.Usage = func() {
+		printVCenterUploadUsage(fs.Output(), program)
+	}
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 1
+	}
+
+	missing := requiredFlagErrors(map[string]string{
+		"destination":        destinationPath,
+		"source":             sourcePath,
+		"vcenter-datacenter": vcenterDatacenter,
+		"vcenter-datastore":  vcenterDatastore,
+		"vcenter-esxi-host":  vcenterESXiHost,
+		"vcenter-host":       vcenterHost,
+		"vcenter-password":   vcenterPassword,
+		"vcenter-username":   vcenterUsername,
+	})
+	if len(missing) > 0 {
+		fmt.Fprintf(stderr, "Error: missing required flags: %s\n", strings.Join(missing, ", "))
+		fs.Usage()
+		return 1
+	}
+
+	cfg := vcenter.UploadConfig{
+		SourcePath:      sourcePath,
+		DestinationPath: destinationPath,
+		Overwrite:       overwrite,
+		VCenter: vcenter.ConnectionConfig{
+			Host:       vcenterHost,
+			Username:   vcenterUsername,
+			Password:   vcenterPassword,
+			Insecure:   vcenterInsecure,
+			Datacenter: vcenterDatacenter,
+			ESXiHost:   vcenterESXiHost,
+			Datastore:  vcenterDatastore,
+		},
+	}
+	if _, err := vcenter.UploadFileToDatastore(context.Background(), cfg); err != nil {
+		fmt.Fprintf(stderr, "Error: vCenter upload failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func runHardwareConfigExampleCommand(program, backend string, args []string, stdout, stderr io.Writer, printExample func(io.Writer)) int {
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		printHardwareConfigExampleUsage(stdout, program, backend)
@@ -411,6 +488,8 @@ func printVCenterUsage(out io.Writer, program string) {
 	fmt.Fprintln(out, "Commands:")
 	fmt.Fprintf(out, "  %s\n", commandBuild)
 	fmt.Fprintln(out, "        Build a vCenter VM or template on a selected ESXi host")
+	fmt.Fprintf(out, "  %s\n", commandUpload)
+	fmt.Fprintln(out, "        Upload a local file to a selected vCenter datastore")
 	fmt.Fprintf(out, "  %s\n", commandHardwareConfigExample)
 	fmt.Fprintln(out, "        Print an example vCenter hardware config YAML file")
 	fmt.Fprintf(out, "  %s\n", commandPrerequisites)
@@ -449,6 +528,31 @@ func printVCenterBuildUsage(out io.Writer, program string) {
 	fmt.Fprintln(out, "        Network name or inventory path")
 	fmt.Fprintln(out, "  --template-name string")
 	fmt.Fprintln(out, "        vCenter VM/template name (defaults to user-data hostname)")
+}
+
+func printVCenterUploadUsage(out io.Writer, program string) {
+	fmt.Fprintf(out, "Usage: %s vcenter %s --source local.file --destination uploads/local.file --vcenter-host vc.example.com --vcenter-username user --vcenter-password pass --vcenter-datacenter DC --vcenter-esxi-host esxi.example.com --vcenter-datastore datastore1 [--overwrite]\n\n", program, commandUpload)
+	fmt.Fprintln(out, "Options:")
+	fmt.Fprintln(out, "  --source string")
+	fmt.Fprintln(out, "        Local source file path")
+	fmt.Fprintln(out, "  --destination string")
+	fmt.Fprintln(out, "        Datastore-relative destination path, for example uploads/local.file")
+	fmt.Fprintln(out, "  --overwrite")
+	fmt.Fprintln(out, "        Overwrite destination file if it already exists")
+	fmt.Fprintln(out, "  --vcenter-host string")
+	fmt.Fprintln(out, "        vCenter hostname or URL")
+	fmt.Fprintln(out, "  --vcenter-username string")
+	fmt.Fprintln(out, "        vCenter username")
+	fmt.Fprintln(out, "  --vcenter-password string")
+	fmt.Fprintln(out, "        vCenter password")
+	fmt.Fprintln(out, "  --vcenter-insecure")
+	fmt.Fprintln(out, "        Skip vCenter TLS certificate verification")
+	fmt.Fprintln(out, "  --vcenter-datacenter string")
+	fmt.Fprintln(out, "        Datacenter name or inventory path")
+	fmt.Fprintln(out, "  --vcenter-esxi-host string")
+	fmt.Fprintln(out, "        ESXi host name or inventory path")
+	fmt.Fprintln(out, "  --vcenter-datastore string")
+	fmt.Fprintln(out, "        Datastore name or inventory path")
 }
 
 func printHardwareConfigExampleUsage(out io.Writer, program, backend string) {

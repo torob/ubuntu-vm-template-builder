@@ -95,9 +95,28 @@ the guest console through a temporary datastore-backed serial log file; the log
 file is deleted after the VM/template is created successfully and left in place
 on failure for debugging.
 
+Upload an arbitrary file to a vCenter datastore:
+
+```bash
+./ubuntu-vm-template-builder vcenter \
+  upload \
+  --source /path/to/local-file.iso \
+  --destination uploads/local-file.iso \
+  --vcenter-host vc.example.com \
+  --vcenter-username administrator@vsphere.local \
+  --vcenter-password 'secret' \
+  --vcenter-insecure \
+  --vcenter-datacenter DC0 \
+  --vcenter-esxi-host esxi-01.example.com \
+  --vcenter-datastore datastore1
+```
+
+`vcenter upload` creates parent datastore directories automatically and fails if
+the destination already exists unless `--overwrite` is passed.
+
 Available backend commands are currently `qemu` and `vcenter`. Each backend
-provides `build`, `prerequisites`, and `hardware-config-example`. A `proxmox`
-command is intentionally not implemented yet.
+provides `build`, `prerequisites`, and `hardware-config-example`; `vcenter` also
+provides `upload`. A `proxmox` command is intentionally not implemented yet.
 
 ## Hardware Config
 

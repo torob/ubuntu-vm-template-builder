@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path"
@@ -317,6 +318,122 @@ func TestUploadInstallerISOThroughSimulatorDatastore(t *testing.T) {
 
 		if err := deleteDatastoreISO(ctx, placement, remotePath); err != nil {
 			t.Fatalf("delete uploaded test ISO: %v", err)
+		}
+	})
+}
+
+func TestUploadFileToDatastoreThroughSimulator(t *testing.T) {
+	runVPXSimulatorService(t, func(ctx context.Context, serverURL *url.URL) {
+		cfg := simulatorVCenterConfig("upload-arbitrary")
+		configureSimulatorVCenterURL(&cfg, serverURL)
+
+		localPath := filepath.Join(t.TempDir(), "hello.txt")
+		if err := os.WriteFile(localPath, []byte("hello datastore\n"), 0o644); err != nil {
+			t.Fatalf("write local source: %v", err)
+		}
+
+		result, err := UploadFileToDatastore(ctx, UploadConfig{
+			SourcePath:      localPath,
+			DestinationPath: "nested/hello.txt",
+			VCenter:         cfg.VCenter,
+		})
+		if err != nil {
+			t.Fatalf("UploadFileToDatastore returned error: %v", err)
+		}
+		if result.DestinationPath != "nested/hello.txt" || result.DatastorePath != "[LocalDS_0] nested/hello.txt" || result.Bytes != int64(len("hello datastore\n")) {
+			t.Fatalf("upload result = %+v", result)
+		}
+
+		client, placement := connectSimulatorUploadPlacement(t, ctx, serverURL, cfg.VCenter)
+		defer client.Logout(ctx)
+		got := readDatastoreFile(t, ctx, placement.Datastore, "nested/hello.txt")
+		if got != "hello datastore\n" {
+			t.Fatalf("uploaded datastore content = %q", got)
+		}
+	})
+}
+
+func TestUploadFileToDatastoreRejectsExistingDestinationByDefault(t *testing.T) {
+	runVPXSimulatorService(t, func(ctx context.Context, serverURL *url.URL) {
+		cfg := simulatorVCenterConfig("upload-existing")
+		configureSimulatorVCenterURL(&cfg, serverURL)
+
+		firstPath := filepath.Join(t.TempDir(), "first.txt")
+		if err := os.WriteFile(firstPath, []byte("first\n"), 0o644); err != nil {
+			t.Fatalf("write first source: %v", err)
+		}
+		uploadCfg := UploadConfig{
+			SourcePath:      firstPath,
+			DestinationPath: "existing.txt",
+			VCenter:         cfg.VCenter,
+		}
+		if _, err := UploadFileToDatastore(ctx, uploadCfg); err != nil {
+			t.Fatalf("initial UploadFileToDatastore returned error: %v", err)
+		}
+
+		secondPath := filepath.Join(t.TempDir(), "second.txt")
+		if err := os.WriteFile(secondPath, []byte("second\n"), 0o644); err != nil {
+			t.Fatalf("write second source: %v", err)
+		}
+		uploadCfg.SourcePath = secondPath
+		_, err := UploadFileToDatastore(ctx, uploadCfg)
+		if err == nil {
+			t.Fatal("UploadFileToDatastore returned nil error for existing destination")
+		}
+		if !strings.Contains(err.Error(), "destination already exists") || !strings.Contains(err.Error(), "--overwrite") {
+			t.Fatalf("existing destination error = %v", err)
+		}
+	})
+}
+
+func TestUploadFileToDatastoreOverwritesExistingDestination(t *testing.T) {
+	runVPXSimulatorService(t, func(ctx context.Context, serverURL *url.URL) {
+		cfg := simulatorVCenterConfig("upload-overwrite")
+		configureSimulatorVCenterURL(&cfg, serverURL)
+
+		firstPath := filepath.Join(t.TempDir(), "first.txt")
+		secondPath := filepath.Join(t.TempDir(), "second.txt")
+		if err := os.WriteFile(firstPath, []byte("first\n"), 0o644); err != nil {
+			t.Fatalf("write first source: %v", err)
+		}
+		if err := os.WriteFile(secondPath, []byte("second\n"), 0o644); err != nil {
+			t.Fatalf("write second source: %v", err)
+		}
+
+		uploadCfg := UploadConfig{
+			SourcePath:      firstPath,
+			DestinationPath: "overwrite.txt",
+			VCenter:         cfg.VCenter,
+		}
+		if _, err := UploadFileToDatastore(ctx, uploadCfg); err != nil {
+			t.Fatalf("initial UploadFileToDatastore returned error: %v", err)
+		}
+		uploadCfg.SourcePath = secondPath
+		uploadCfg.Overwrite = true
+		if _, err := UploadFileToDatastore(ctx, uploadCfg); err != nil {
+			t.Fatalf("overwrite UploadFileToDatastore returned error: %v", err)
+		}
+
+		client, placement := connectSimulatorUploadPlacement(t, ctx, serverURL, cfg.VCenter)
+		defer client.Logout(ctx)
+		got := readDatastoreFile(t, ctx, placement.Datastore, "overwrite.txt")
+		if got != "second\n" {
+			t.Fatalf("overwritten datastore content = %q", got)
+		}
+	})
+}
+
+func TestResolveUploadPlacementRejectsInvalidDatastore(t *testing.T) {
+	runVPXSimulator(t, func(ctx context.Context, client *vim25.Client) {
+		cfg := simulatorVCenterConfig("invalid-upload").VCenter
+		cfg.Datastore = "missing-datastore"
+
+		_, err := ResolveUploadPlacement(ctx, client, cfg)
+		if err == nil {
+			t.Fatal("ResolveUploadPlacement returned nil error")
+		}
+		if !strings.Contains(err.Error(), `find datastore "missing-datastore"`) {
+			t.Fatalf("ResolveUploadPlacement error = %v", err)
 		}
 	})
 }
@@ -756,6 +873,41 @@ func simulatorVCenterConfig(name string) Config {
 			Name:       name,
 		},
 	}
+}
+
+func configureSimulatorVCenterURL(cfg *Config, serverURL *url.URL) {
+	cfg.VCenter.Host = serverURL.String()
+	cfg.VCenter.Username = serverURL.User.Username()
+	cfg.VCenter.Password, _ = serverURL.User.Password()
+	cfg.VCenter.Insecure = true
+}
+
+func connectSimulatorUploadPlacement(t *testing.T, ctx context.Context, serverURL *url.URL, cfg ConnectionConfig) (*govmomi.Client, *placement) {
+	t.Helper()
+	client, err := govmomi.NewClient(ctx, serverURL, true)
+	if err != nil {
+		t.Fatalf("connect to simulator: %v", err)
+	}
+	placement, err := ResolveUploadPlacement(ctx, client.Client, cfg)
+	if err != nil {
+		_ = client.Logout(ctx)
+		t.Fatalf("ResolveUploadPlacement returned error: %v", err)
+	}
+	return client, placement
+}
+
+func readDatastoreFile(t *testing.T, ctx context.Context, datastore *object.Datastore, remotePath string) string {
+	t.Helper()
+	reader, _, err := datastore.Download(ctx, remotePath, nil)
+	if err != nil {
+		t.Fatalf("download datastore file %q: %v", remotePath, err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read datastore file %q: %v", remotePath, err)
+	}
+	return string(data)
 }
 
 func createSimulatorVM(ctx context.Context, client *vim25.Client, cfg Config, placement *placement) (*object.VirtualMachine, error) {

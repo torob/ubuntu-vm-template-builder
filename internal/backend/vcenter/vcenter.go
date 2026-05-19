@@ -36,6 +36,21 @@ type Config struct {
 	VCenter      ConnectionConfig
 }
 
+type UploadConfig struct {
+	SourcePath      string
+	DestinationPath string
+	Overwrite       bool
+	VCenter         ConnectionConfig
+}
+
+type UploadResult struct {
+	SourcePath      string
+	DestinationPath string
+	DatastorePath   string
+	Bytes           int64
+	Overwrite       bool
+}
+
 type ConnectionConfig struct {
 	Host       string
 	Username   string
@@ -130,6 +145,60 @@ func CheckPrerequisites(cfg Config) error {
 		return fmt.Errorf("prepare vCenter seed user-data: %w", err)
 	}
 	return nil
+}
+
+func UploadFileToDatastore(ctx context.Context, cfg UploadConfig) (UploadResult, error) {
+	sourcePath := strings.TrimSpace(cfg.SourcePath)
+	sourceInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		return UploadResult{}, fmt.Errorf("source file %q: %w", sourcePath, err)
+	}
+	if !sourceInfo.Mode().IsRegular() {
+		return UploadResult{}, fmt.Errorf("source file %q is not a regular file", sourcePath)
+	}
+
+	remotePath, err := normalizeUploadDestinationPath(cfg.DestinationPath)
+	if err != nil {
+		return UploadResult{}, err
+	}
+
+	client, placement, err := connectAndResolveUploadPlacement(ctx, cfg.VCenter)
+	if err != nil {
+		return UploadResult{}, err
+	}
+	defer client.Logout(context.Background())
+
+	datastorePath := placement.Datastore.Path(remotePath)
+	fmt.Printf("Upload source: %s (%d bytes)\n", sourcePath, sourceInfo.Size())
+	fmt.Printf("Upload destination: %s\n", datastorePath)
+	fmt.Printf("Overwrite existing destination: %t\n", cfg.Overwrite)
+
+	if !cfg.Overwrite {
+		exists, err := datastoreFileExists(ctx, placement, remotePath)
+		if err != nil {
+			return UploadResult{}, fmt.Errorf("check destination %q: %w", datastorePath, err)
+		}
+		if exists {
+			return UploadResult{}, fmt.Errorf("destination already exists: %s (pass --overwrite to replace it)", datastorePath)
+		}
+	}
+
+	if err := ensureDatastoreParentDirectory(ctx, placement, remotePath); err != nil {
+		return UploadResult{}, err
+	}
+
+	fmt.Printf("Uploading file to datastore: %s\n", datastorePath)
+	if err := uploadDatastoreFile(ctx, placement, sourcePath, remotePath); err != nil {
+		return UploadResult{}, fmt.Errorf("upload file to datastore: %w", err)
+	}
+	fmt.Printf("OK file uploaded: %s\n", datastorePath)
+	return UploadResult{
+		SourcePath:      sourcePath,
+		DestinationPath: remotePath,
+		DatastorePath:   datastorePath,
+		Bytes:           sourceInfo.Size(),
+		Overwrite:       cfg.Overwrite,
+	}, nil
 }
 
 func (i *Installer) Install() bool {
@@ -274,6 +343,23 @@ func connectAndResolvePlacement(ctx context.Context, cfg ConnectionConfig) (*gov
 	}
 
 	fmt.Println("OK vCenter placement validated")
+	return client, placement, nil
+}
+
+func connectAndResolveUploadPlacement(ctx context.Context, cfg ConnectionConfig) (*govmomi.Client, *placement, error) {
+	fmt.Println("Connecting to vCenter and validating datastore placement...")
+	client, err := connect(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	placement, err := ResolveUploadPlacement(ctx, client.Client, cfg)
+	if err != nil {
+		_ = client.Logout(context.Background())
+		return nil, nil, err
+	}
+
+	fmt.Println("OK vCenter datastore placement validated")
 	return client, placement, nil
 }
 
@@ -474,6 +560,37 @@ func ResolvePlacement(ctx context.Context, client *vim25.Client, cfg ConnectionC
 	}, nil
 }
 
+func ResolveUploadPlacement(ctx context.Context, client *vim25.Client, cfg ConnectionConfig) (*placement, error) {
+	finder := find.NewFinder(client, true)
+
+	datacenter, err := finder.Datacenter(ctx, cfg.Datacenter)
+	if err != nil {
+		return nil, fmt.Errorf("find datacenter %q: %w", cfg.Datacenter, err)
+	}
+	finder.SetDatacenter(datacenter)
+
+	host, err := finder.HostSystem(ctx, cfg.ESXiHost)
+	if err != nil {
+		return nil, fmt.Errorf("find ESXi host %q: %w", cfg.ESXiHost, err)
+	}
+
+	datastore, err := finder.Datastore(ctx, cfg.Datastore)
+	if err != nil {
+		return nil, fmt.Errorf("find datastore %q: %w", cfg.Datastore, err)
+	}
+	if ok, err := hostHasReference(ctx, host, "datastore", datastore.Reference()); err != nil {
+		return nil, fmt.Errorf("validate datastore %q on host %q: %w", cfg.Datastore, cfg.ESXiHost, err)
+	} else if !ok {
+		return nil, fmt.Errorf("datastore %q is not attached to host %q", cfg.Datastore, cfg.ESXiHost)
+	}
+
+	return &placement{
+		Datacenter: datacenter,
+		Host:       host,
+		Datastore:  datastore,
+	}, nil
+}
+
 func hostHasReference(ctx context.Context, host *object.HostSystem, property string, ref types.ManagedObjectReference) (bool, error) {
 	var hostMO mo.HostSystem
 	if err := host.Properties(ctx, host.Reference(), []string{property}, &hostMO); err != nil {
@@ -550,6 +667,95 @@ func uploadDatastoreFile(ctx context.Context, placement *placement, localPath, r
 		}
 	}
 	return nil
+}
+
+func normalizeUploadDestinationPath(destination string) (string, error) {
+	raw := filepath.ToSlash(strings.TrimSpace(destination))
+	if raw == "" {
+		return "", errors.New("--destination is required")
+	}
+	var datastorePath object.DatastorePath
+	if datastorePath.FromString(raw) {
+		return "", errors.New("--destination must be relative to the selected datastore, for example uploads/file.iso")
+	}
+	if strings.HasSuffix(raw, "/") {
+		return "", fmt.Errorf("--destination %q must include a file name", destination)
+	}
+	remotePath := path.Clean(raw)
+	switch {
+	case remotePath == "." || remotePath == "/":
+		return "", fmt.Errorf("--destination %q must include a file name", destination)
+	case path.IsAbs(remotePath), remotePath == "..", strings.HasPrefix(remotePath, "../"):
+		return "", fmt.Errorf("--destination %q must be relative to the selected datastore", destination)
+	}
+	return remotePath, nil
+}
+
+func datastoreFileExists(ctx context.Context, placement *placement, remotePath string) (bool, error) {
+	exists, err := datastoreFileExistsWithContext(ctx, placement, remotePath)
+	if err == nil {
+		return exists, nil
+	}
+
+	hostExists, hostErr := datastoreFileExistsWithContext(placement.Datastore.HostContext(ctx, placement.Host), placement, remotePath)
+	if hostErr == nil {
+		return hostExists, nil
+	}
+	if isMissingDatastoreFile(err) && (isMissingDatastoreFile(hostErr) || isDatastoreEndpointConnectionError(hostErr)) {
+		return false, nil
+	}
+	if !isMissingDatastoreFile(err) && isMissingDatastoreFile(hostErr) {
+		return false, nil
+	}
+	if isMissingDatastoreFile(err) {
+		return false, fmt.Errorf("vCenter endpoint reported missing file; selected ESXi host endpoint failed: %w", hostErr)
+	}
+	return false, fmt.Errorf("vCenter endpoint failed: %v; selected ESXi host endpoint failed: %w", err, hostErr)
+}
+
+func datastoreFileExistsWithContext(ctx context.Context, placement *placement, remotePath string) (bool, error) {
+	reader, _, err := placement.Datastore.Download(ctx, remotePath, nil)
+	if err != nil {
+		return false, err
+	}
+	if err := reader.Close(); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func isDatastoreEndpointConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "no route to host") ||
+		strings.Contains(msg, "connection reset")
+}
+
+func ensureDatastoreParentDirectory(ctx context.Context, placement *placement, remotePath string) error {
+	parent := path.Dir(remotePath)
+	if parent == "." || parent == "/" {
+		return nil
+	}
+
+	manager := placement.Datastore.NewFileManager(placement.Datacenter, true)
+	datastoreDir := manager.Path(parent).String()
+	if err := manager.FileManager.MakeDirectory(ctx, datastoreDir, placement.Datacenter, true); err != nil && !isAlreadyExistsError(err) {
+		return fmt.Errorf("create datastore directory %q: %w", datastoreDir, err)
+	}
+	return nil
+}
+
+func isAlreadyExistsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "filealreadyexists") ||
+		strings.Contains(msg, "file already exists")
 }
 
 func buildConsoleLogPaths(placement *placement, templateName string) (string, string) {

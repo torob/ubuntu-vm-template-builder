@@ -43,6 +43,17 @@ func TestSubcommandHelpExitsSuccessfully(t *testing.T) {
 	}
 }
 
+func TestVCenterHelpMentionsUploadCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ubuntu-vm-template-builder", "vcenter", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("vcenter --help exit code = %d, stderr:\n%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), commandUpload) {
+		t.Fatalf("vcenter help missing upload command:\n%s", stdout.String())
+	}
+}
+
 func TestBuildCommandHelpExitsSuccessfully(t *testing.T) {
 	for _, command := range []string{"qemu", "vcenter"} {
 		t.Run(command, func(t *testing.T) {
@@ -58,6 +69,20 @@ func TestBuildCommandHelpExitsSuccessfully(t *testing.T) {
 				t.Fatalf("%s %s help output has unexpected usage:\n%s", command, commandBuild, stderr.String())
 			}
 		})
+	}
+}
+
+func TestVCenterUploadHelpExitsSuccessfully(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ubuntu-vm-template-builder", "vcenter", commandUpload, "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("vcenter upload --help exit code = %d, stderr:\n%s", code, stderr.String())
+	}
+	output := stderr.String()
+	for _, want := range []string{"Usage: ubuntu-vm-template-builder vcenter upload", "--source", "--destination", "--overwrite", "--vcenter-datastore"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("vcenter upload help missing %q:\n%s", want, output)
+		}
 	}
 }
 
@@ -216,6 +241,55 @@ func TestHardwareConfigExampleRejectsExtraArgs(t *testing.T) {
 				t.Fatalf("extra arg error is unexpected:\n%s", stderr.String())
 			}
 		})
+	}
+}
+
+func TestRunVCenterUploadRequiresUploadAndPlacementFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ubuntu-vm-template-builder", "vcenter", commandUpload}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("vcenter upload returned success without required flags")
+	}
+	errOutput := stderr.String()
+	for _, want := range []string{"--destination", "--source", "--vcenter-datacenter", "--vcenter-datastore", "--vcenter-esxi-host", "--vcenter-host", "--vcenter-password", "--vcenter-username"} {
+		if !strings.Contains(errOutput, want) {
+			t.Fatalf("vcenter upload missing flag error does not mention %s:\n%s", want, errOutput)
+		}
+	}
+	for _, absent := range []string{"--iso", "--user-data", "--hardware-config", "--vcenter-folder", "--vcenter-network"} {
+		if strings.Contains(strings.SplitN(errOutput, "\n", 2)[0], absent) {
+			t.Fatalf("vcenter upload missing flag error should not mention build-only flag %s:\n%s", absent, errOutput)
+		}
+	}
+}
+
+func TestRunVCenterUploadDoesNotRequireBuildOnlyFlagsAndAcceptsOverwrite(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ubuntu-vm-template-builder",
+		"vcenter",
+		commandUpload,
+		"--source", filepath.Join(t.TempDir(), "missing.txt"),
+		"--destination", "uploads/missing.txt",
+		"--overwrite",
+		"--vcenter-host", "vc.example.com",
+		"--vcenter-username", "administrator@vsphere.local",
+		"--vcenter-password", "secret",
+		"--vcenter-datacenter", "DC0",
+		"--vcenter-esxi-host", "esxi.example.com",
+		"--vcenter-datastore", "datastore1",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("vcenter upload unexpectedly reached success with missing local source")
+	}
+	errOutput := stderr.String()
+	if !strings.Contains(errOutput, "source file") {
+		t.Fatalf("vcenter upload should validate source before connecting:\n%s", errOutput)
+	}
+	for _, absent := range []string{"--iso", "--user-data", "--hardware-config", "--vcenter-folder", "--vcenter-network", "flag provided but not defined"} {
+		if strings.Contains(errOutput, absent) {
+			t.Fatalf("vcenter upload error unexpectedly contains %q:\n%s", absent, errOutput)
+		}
 	}
 }
 
