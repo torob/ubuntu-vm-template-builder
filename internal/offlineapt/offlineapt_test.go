@@ -131,6 +131,7 @@ func TestInstallLateCommandsUseUbuntuSignedRepoSubset(t *testing.T) {
 		dep11IndexTargetOption,
 		cnfIndexTargetOption,
 		"-y install",
+		`rmdir "$(dirname "$repo_dst")" 2>/dev/null || true`,
 		"git",
 		"curl",
 	} {

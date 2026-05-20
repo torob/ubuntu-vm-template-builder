@@ -481,6 +481,7 @@ func InstallLateCommands(install InstallConfig) []string {
 		fmt.Sprintf("curtin in-target --target=/target -- apt-get %s -y install %s", aptOptions, packageArgs),
 		`rm -f "$source_list"`,
 		`rm -rf "$source_parts" "$repo_dst"`,
+		`rmdir "$(dirname "$repo_dst")" 2>/dev/null || true`,
 	)
 
 	return []string{"sh -ceu " + shellQuote(strings.Join(lines, "\n"))}
