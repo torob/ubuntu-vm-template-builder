@@ -459,6 +459,8 @@ func runProxmoxBuild(program string, args []string, stdout, stderr io.Writer) in
 		proxmoxBridge      string
 		templateName       string
 		extraPackagesPath  string
+		optionsPath        string
+		cloudInitPath      string
 	)
 
 	fs := flag.NewFlagSet(commandProxmox+" "+commandBuild, flag.ContinueOnError)
@@ -477,6 +479,8 @@ func runProxmoxBuild(program string, args []string, stdout, stderr io.Writer) in
 	fs.StringVar(&proxmoxBridge, "proxmox-bridge", "", "Proxmox network bridge, for example vmbr0")
 	fs.StringVar(&templateName, "template-name", "", "Proxmox VM/template name (defaults to user-data hostname)")
 	fs.StringVar(&extraPackagesPath, "install-extra-packages", "", "YAML file with apt_url and packages to embed in the installer ISO")
+	fs.StringVar(&optionsPath, "options", "", "YAML file with Proxmox VM Options-tab settings")
+	fs.StringVar(&cloudInitPath, "cloud-init-options", "", "YAML file with Proxmox Cloud-Init settings")
 	fs.Usage = func() {
 		printProxmoxBuildUsage(fs.Output(), program)
 	}
@@ -535,15 +539,27 @@ func runProxmoxBuild(program string, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
+	options, err := proxmox.LoadOptionsConfig(optionsPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
+	cloudInitOptions, err := proxmox.LoadCloudInitOptionsConfig(cloudInitPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
 
 	cfg := proxmox.Config{
-		UbuntuISO:     isoPath,
-		UserDataPath:  userDataPath,
-		UserData:      userData,
-		DiskSize:      hardware.DiskSize,
-		DisplayName:   displayName,
-		Hardware:      hardware,
-		ExtraPackages: extraPackages,
+		UbuntuISO:        isoPath,
+		UserDataPath:     userDataPath,
+		UserData:         userData,
+		DiskSize:         hardware.DiskSize,
+		DisplayName:      displayName,
+		Hardware:         hardware,
+		ExtraPackages:    extraPackages,
+		Options:          options,
+		CloudInitOptions: cloudInitOptions,
 		Proxmox: proxmox.ConnectionConfig{
 			Host:        proxmoxHost,
 			TokenID:     proxmoxTokenID,
@@ -761,7 +777,7 @@ func printProxmoxUsage(out io.Writer, program string) {
 }
 
 func printProxmoxBuildUsage(out io.Writer, program string) {
-	fmt.Fprintf(out, "Usage: %s proxmox %s --iso ubuntu.iso --user-data autoinstall.yaml --proxmox-host pve.example.com --proxmox-token-id 'root@pam!builder' --proxmox-token-secret secret --proxmox-node pve1 --proxmox-iso-storage local --proxmox-disk-storage vms --proxmox-bridge vmbr0 [--template-name ubuntu-template] --hardware-config hardware.yaml\n\n", program, commandBuild)
+	fmt.Fprintf(out, "Usage: %s proxmox %s --iso ubuntu.iso --user-data autoinstall.yaml --proxmox-host pve.example.com --proxmox-token-id 'root@pam!builder' --proxmox-token-secret secret --proxmox-node pve1 --proxmox-iso-storage local --proxmox-disk-storage vms --proxmox-bridge vmbr0 [--template-name ubuntu-template] [--options options.yaml] [--cloud-init-options cloud-init.yaml] --hardware-config hardware.yaml\n\n", program, commandBuild)
 	fmt.Fprintln(out, "Options:")
 	fmt.Fprintln(out, "  --iso string")
 	fmt.Fprintln(out, "        Ubuntu ISO file path")
@@ -791,6 +807,10 @@ func printProxmoxBuildUsage(out io.Writer, program string) {
 	fmt.Fprintln(out, "        Proxmox VM/template name (defaults to user-data hostname)")
 	fmt.Fprintln(out, "  --install-extra-packages string")
 	fmt.Fprintln(out, "        YAML file with apt_url and packages to embed in the installer ISO")
+	fmt.Fprintln(out, "  --options string")
+	fmt.Fprintln(out, "        YAML file with Proxmox VM Options-tab settings")
+	fmt.Fprintln(out, "  --cloud-init-options string")
+	fmt.Fprintln(out, "        YAML file with Proxmox Cloud-Init settings")
 }
 
 func printHardwareConfigExampleUsage(out io.Writer, program, backend string) {
@@ -967,8 +987,9 @@ func collectProxmoxPrerequisites() prerequisiteReport {
 			"valid Proxmox VE API-token connection flags",
 			"target Proxmox node with access to the selected storages and bridge",
 			"--proxmox-iso-storage that allows iso content and has enough free space for the remastered installer ISO",
-			"--proxmox-disk-storage that allows images content and has enough free space for the VM disk and EFI vars",
+			"--proxmox-disk-storage that allows images content and has enough free space for the VM disk, EFI vars, and optional Cloud-Init drive",
 			"hardware config YAML with disk_size set to a valid size such as 20G",
+			"optional --options and --cloud-init-options YAML files with supported Proxmox settings only",
 			"--install-extra-packages config with apt_url and packages; when used, host tools apt-get, xorriso, and the Ubuntu archive keyring are checked during the build",
 		},
 	}

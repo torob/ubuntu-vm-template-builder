@@ -136,6 +136,8 @@ Build a Proxmox VE VM or template:
   --proxmox-disk-storage vms \
   --proxmox-bridge vmbr0 \
   --template-name ubuntu-24.04-template \
+  --options options.proxmox.yaml \
+  --cloud-init-options cloud-init.proxmox.yaml \
   --install-extra-packages extra-packages.yaml
 ```
 
@@ -144,9 +146,10 @@ template, named by `--template-name`, or by the hostname in `--user-data` when
 `--template-name` is omitted. API-token authentication is the only supported
 authentication mode. `--proxmox-iso-storage` must allow `iso` content and is
 used for the temporary remastered installer ISO. `--proxmox-disk-storage` must
-allow `images` content and is used for the VM disk and EFI vars. Before creating
-or uploading remote resources, the build checks the selected storage content
-types and available capacity for the remastered ISO, disk, and EFI vars. During
+allow `images` content and is used for the VM disk, EFI vars, and optional
+Cloud-Init drive. Before creating or uploading remote resources, the build
+checks the selected storage content types and available capacity for the
+remastered ISO, disk, EFI vars, and optional Cloud-Init drive. During
 installation it streams the guest serial console through Proxmox's websocket
 console API on a best-effort basis.
 
@@ -302,6 +305,97 @@ For Proxmox, `--proxmox-vmid` is optional. When it is omitted, the builder asks
 Proxmox for the next available VMID. Set `proxmox.output_type: vm` to leave the
 installed guest as a powered-off VM instead of converting it to a template. The
 default is `template`.
+
+### Proxmox VM Options and Cloud-Init Options
+
+`proxmox build` accepts two optional typed YAML files:
+
+- `--options` applies VM Options-tab settings after installation finishes.
+- `--cloud-init-options` creates a Cloud-Init drive on `--proxmox-disk-storage`
+  and applies Proxmox Cloud-Init settings after installation finishes.
+
+Both files are strict: unknown keys fail before the build touches Proxmox. Boot
+order, installer ISO attachment, serial console, disk, EFI, network creation,
+and template conversion stay controlled by the builder.
+
+`options.proxmox.yaml` structure:
+
+```yaml
+start_at_boot: false
+startup:
+  order: 10
+  up_delay_seconds: 30
+  down_delay_seconds: 60
+qemu_guest_agent:
+  enabled: true
+  freeze_fs_on_backup: false
+  fstrim_cloned_disks: true
+  type: virtio # virtio or isa
+protection: false
+tablet: true
+acpi: true
+kvm: true
+freeze_cpu_at_startup: false
+local_time: false
+rtc_start_date: now
+hotplug:
+  network: true
+  disk: true
+  usb: true
+  memory: false
+  cpu: false
+  cloudinit: true
+smbios:
+  values_are_base64: false
+  uuid: ""
+  manufacturer: ""
+  product: ""
+  version: ""
+  serial: ""
+  sku: ""
+  family: ""
+spice_enhancements:
+  folder_sharing: false
+  video_streaming: off # off, all, or filter
+vm_state_storage: ""
+tags:
+  - ubuntu
+  - template
+description: |
+  Ubuntu template built by ubuntu-vm-template-builder.
+```
+
+`cloud-init.proxmox.yaml` structure:
+
+```yaml
+type: nocloud # nocloud, configdrive2, or opennebula
+upgrade: false
+user: ubuntu
+password: ""
+ssh_keys:
+  - ssh-ed25519 AAAA... user@example
+dns:
+  nameservers:
+    - 1.1.1.1
+    - 8.8.8.8
+  search_domains:
+    - example.com
+network:
+  - index: 0
+    ipv4: dhcp
+    gateway4: ""
+    ipv6: auto
+    gateway6: ""
+custom:
+  user: local:snippets/user-data.yaml
+  network: local:snippets/network-data.yaml
+  meta: local:snippets/meta-data.yaml
+  vendor: local:snippets/vendor-data.yaml
+```
+
+`custom` references must already exist in Proxmox storage; the builder does not
+upload snippet files. Write `ssh_keys` as normal OpenSSH public keys; the
+builder applies Proxmox's required API encoding.
 
 ## Extra Offline Packages
 

@@ -247,6 +247,201 @@ func TestBuildCreateVMValuesUsesRequestedHardware(t *testing.T) {
 	}
 }
 
+func TestLoadOptionsConfigStrictAndSerializesExplicitFalse(t *testing.T) {
+	path := writeTempYAML(t, "options.yaml", `
+start_at_boot: false
+qemu_guest_agent:
+  enabled: false
+protection: false
+tablet: true
+tags:
+  - ubuntu
+  - template
+description: example template
+`)
+	options, err := LoadOptionsConfig(path)
+	if err != nil {
+		t.Fatalf("LoadOptionsConfig returned error: %v", err)
+	}
+	if !options.Enabled || options.StartAtBoot == nil || *options.StartAtBoot {
+		t.Fatalf("loaded options did not preserve explicit false: %+v", options)
+	}
+
+	cfg := testProxmoxConfig()
+	cfg.Options = options
+	values, err := BuildOptionsValues(cfg)
+	if err != nil {
+		t.Fatalf("BuildOptionsValues returned error: %v", err)
+	}
+	want := map[string]string{
+		"onboot":      "0",
+		"agent":       "enabled=0",
+		"protection":  "0",
+		"tablet":      "1",
+		"tags":        "ubuntu;template",
+		"description": "example template",
+	}
+	for key, wantValue := range want {
+		if got := values.Get(key); got != wantValue {
+			t.Fatalf("values[%s] = %q, want %q; all values: %v", key, got, wantValue, values)
+		}
+	}
+}
+
+func TestLoadOptionsConfigRejectsUnknownField(t *testing.T) {
+	path := writeTempYAML(t, "options.yaml", "boot: order=scsi0\n")
+	if _, err := LoadOptionsConfig(path); err == nil {
+		t.Fatal("LoadOptionsConfig returned nil error for unknown field")
+	} else if !strings.Contains(err.Error(), "field boot not found") {
+		t.Fatalf("unknown field error = %v", err)
+	}
+}
+
+func TestBuildOptionsValuesSerializesTypedFields(t *testing.T) {
+	cfg := testProxmoxConfig()
+	cfg.Options = OptionsConfig{
+		StartAtBoot: boolPtr(true),
+		Startup: StartupOptions{
+			Order:            intPtr(10),
+			UpDelaySeconds:   intPtr(30),
+			DownDelaySeconds: intPtr(60),
+		},
+		QEMUGuestAgent: QEMUGuestAgentOptions{
+			Enabled:           boolPtr(true),
+			FreezeFSOnBackup:  boolPtr(false),
+			FstrimClonedDisks: boolPtr(true),
+			Type:              "virtio",
+		},
+		ACPI:               boolPtr(true),
+		KVM:                boolPtr(true),
+		FreezeCPUAtStartup: boolPtr(false),
+		LocalTime:          boolPtr(false),
+		RTCStartDate:       "now",
+		Hotplug: HotplugOptions{
+			Network:   boolPtr(true),
+			Disk:      boolPtr(true),
+			USB:       boolPtr(true),
+			Memory:    boolPtr(false),
+			CPU:       boolPtr(false),
+			CloudInit: boolPtr(true),
+		},
+		SMBIOS: SMBIOSOptions{
+			ValuesAreBase64: boolPtr(false),
+			UUID:            "11111111-2222-3333-4444-555555555555",
+			Manufacturer:    "Canonical",
+			Product:         "Ubuntu",
+			Version:         "24.04",
+			Serial:          "serial",
+			SKU:             "sku",
+			Family:          "linux",
+		},
+		SPICEEnhancements: SPICEEnhancementsOptions{
+			FolderSharing:  boolPtr(true),
+			VideoStreaming: "filter",
+		},
+		VMStateStorage: "vms",
+	}
+
+	values, err := BuildOptionsValues(cfg)
+	if err != nil {
+		t.Fatalf("BuildOptionsValues returned error: %v", err)
+	}
+	want := map[string]string{
+		"onboot":             "1",
+		"startup":            "order=10,up=30,down=60",
+		"agent":              "enabled=1,freeze-fs-on-backup=0,fstrim_cloned_disks=1,type=virtio",
+		"acpi":               "1",
+		"kvm":                "1",
+		"freeze":             "0",
+		"localtime":          "0",
+		"startdate":          "now",
+		"hotplug":            "network,disk,usb,cloudinit",
+		"smbios1":            "base64=0,uuid=11111111-2222-3333-4444-555555555555,manufacturer=Canonical,product=Ubuntu,version=24.04,serial=serial,sku=sku,family=linux",
+		"spice_enhancements": "foldersharing=1,videostreaming=filter",
+		"vmstatestorage":     "vms",
+	}
+	for key, wantValue := range want {
+		if got := values.Get(key); got != wantValue {
+			t.Fatalf("values[%s] = %q, want %q; all values: %v", key, got, wantValue, values)
+		}
+	}
+}
+
+func TestLoadCloudInitOptionsConfigStrictAndSerializes(t *testing.T) {
+	path := writeTempYAML(t, "cloud-init.yaml", `
+type: nocloud
+upgrade: false
+user: ubuntu
+password: secret
+ssh_keys:
+  - ssh-ed25519 AAAA first@example
+  - ssh-ed25519 BBBB second@example
+dns:
+  nameservers:
+    - 1.1.1.1
+    - 8.8.8.8
+  search_domains:
+    - example.com
+network:
+  - index: 0
+    ipv4: dhcp
+    ipv6: auto
+  - index: 1
+    ipv4: 192.0.2.10/24
+    gateway4: 192.0.2.1
+custom:
+  user: local:snippets/user-data.yaml
+  network: local:snippets/network-data.yaml
+  meta: local:snippets/meta-data.yaml
+  vendor: local:snippets/vendor-data.yaml
+`)
+	cloudInit, err := LoadCloudInitOptionsConfig(path)
+	if err != nil {
+		t.Fatalf("LoadCloudInitOptionsConfig returned error: %v", err)
+	}
+
+	cfg := testProxmoxConfig()
+	cfg.CloudInitOptions = cloudInit
+	values, err := BuildCloudInitValues(cfg)
+	if err != nil {
+		t.Fatalf("BuildCloudInitValues returned error: %v", err)
+	}
+	want := map[string]string{
+		"ide2":         "vms:cloudinit",
+		"citype":       "nocloud",
+		"ciupgrade":    "0",
+		"ciuser":       "ubuntu",
+		"cipassword":   "secret",
+		"sshkeys":      "ssh-ed25519%20AAAA%20first%40example%0Assh-ed25519%20BBBB%20second%40example",
+		"nameserver":   "1.1.1.1 8.8.8.8",
+		"searchdomain": "example.com",
+		"ipconfig0":    "ip=dhcp,ip6=auto",
+		"ipconfig1":    "ip=192.0.2.10/24,gw=192.0.2.1",
+		"cicustom":     "meta=local:snippets/meta-data.yaml,network=local:snippets/network-data.yaml,user=local:snippets/user-data.yaml,vendor=local:snippets/vendor-data.yaml",
+	}
+	for key, wantValue := range want {
+		if got := values.Get(key); got != wantValue {
+			t.Fatalf("values[%s] = %q, want %q; all values: %v", key, got, wantValue, values)
+		}
+	}
+}
+
+func TestLoadCloudInitOptionsConfigRejectsInvalidNetwork(t *testing.T) {
+	path := writeTempYAML(t, "cloud-init.yaml", `
+type: nocloud
+network:
+  - index: 0
+    ipv4: dhcp
+  - index: 0
+    ipv4: dhcp
+`)
+	if _, err := LoadCloudInitOptionsConfig(path); err == nil {
+		t.Fatal("LoadCloudInitOptionsConfig returned nil error for duplicated network index")
+	} else if !strings.Contains(err.Error(), "duplicated") {
+		t.Fatalf("duplicate network index error = %v", err)
+	}
+}
+
 func TestSelectVMIDAllocatesByDefault(t *testing.T) {
 	fake := newFakeAPI()
 	fake.nextID = 321
@@ -325,6 +520,27 @@ func TestPreflightBuildStoragesAggregatesSameStorageCapacity(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "insufficient capacity") {
 		t.Fatalf("preflight error = %v", err)
+	}
+}
+
+func TestPreflightBuildStoragesIncludesCloudInitDisk(t *testing.T) {
+	fake := newFakeAPI()
+	fake.storageStatuses["vms"] = StorageStatus{
+		Active:  1,
+		Enabled: 1,
+		Content: "images",
+		Avail:   flexibleInt64{Value: 20 * 1024 * 1024 * 1024, Set: true},
+	}
+	buildCfg := testProxmoxConfig()
+	buildCfg.CloudInitOptions = CloudInitOptionsConfig{Enabled: true}
+	isoPath := writeTempFile(t, "installer.iso", 1024)
+
+	err := preflightBuildStorages(context.Background(), fake, testProxmoxConnection(), buildCfg, isoPath)
+	if err == nil {
+		t.Fatal("preflightBuildStorages returned nil error when disk storage lacked cloud-init capacity")
+	}
+	if !strings.Contains(err.Error(), "disk+cloud-init") || !strings.Contains(err.Error(), "insufficient capacity") {
+		t.Fatalf("cloud-init capacity preflight error = %v", err)
 	}
 }
 
@@ -428,6 +644,60 @@ func TestInstallFlowBuildsVMWithoutTemplate(t *testing.T) {
 	if fake.updateValues.Get("delete") != "ide2,serial0" || fake.updateValues.Get("boot") != "order=scsi0" {
 		t.Fatalf("finalize values = %v", fake.updateValues)
 	}
+}
+
+func TestInstallFlowAppliesCloudInitThenOptionsBeforeTemplate(t *testing.T) {
+	restore := setFastPollIntervals()
+	defer restore()
+
+	fake := newFakeAPI()
+	cfg := testProxmoxConfig()
+	cfg.CloudInitOptions = CloudInitOptionsConfig{
+		Enabled: true,
+		Type:    "nocloud",
+		Upgrade: boolPtr(false),
+		User:    "ubuntu",
+		Network: []CloudInitIPConfig{
+			{Index: 0, IPv4: "dhcp"},
+		},
+	}
+	cfg.Options = OptionsConfig{
+		Enabled:     true,
+		StartAtBoot: boolPtr(false),
+		Protection:  boolPtr(true),
+		Tags:        []string{"ubuntu", "template"},
+	}
+	installer := &Installer{cfg: cfg}
+	err := installer.installWithClient(context.Background(), fake, func(context.Context) (string, error) {
+		return writeTempFile(t, "installer.iso", 1024), nil
+	})
+	if err != nil {
+		t.Fatalf("installWithClient returned error: %v", err)
+	}
+	if len(fake.updateValuesHistory) != 3 {
+		t.Fatalf("update history length = %d, want 3: %v", len(fake.updateValuesHistory), fake.updateValuesHistory)
+	}
+	if got := fake.updateValuesHistory[0].Get("delete"); got != "ide2,serial0" {
+		t.Fatalf("finalize delete = %q, want ide2,serial0", got)
+	}
+	if got := fake.updateValuesHistory[1].Get("ide2"); got != "vms:cloudinit" {
+		t.Fatalf("cloud-init ide2 = %q, want vms:cloudinit; values=%v", got, fake.updateValuesHistory[1])
+	}
+	if got := fake.updateValuesHistory[1].Get("ipconfig0"); got != "ip=dhcp" {
+		t.Fatalf("cloud-init ipconfig0 = %q, want ip=dhcp; values=%v", got, fake.updateValuesHistory[1])
+	}
+	if got := fake.updateValuesHistory[2].Get("protection"); got != "1" {
+		t.Fatalf("options protection = %q, want 1; values=%v", got, fake.updateValuesHistory[2])
+	}
+	assertCallsContainInOrder(t, fake.calls, []string{
+		"update-config",
+		"wait-task:update",
+		"update-config",
+		"wait-task:update",
+		"update-config",
+		"wait-task:update",
+		"template-vm",
+	})
 }
 
 func TestInstallFlowReportsTaskFailure(t *testing.T) {
@@ -561,6 +831,23 @@ func writeTempFile(t *testing.T, name string, size int64) string {
 	return path
 }
 
+func writeTempYAML(t *testing.T, name, data string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(data)+"\n"), 0o644); err != nil {
+		t.Fatalf("write temp YAML: %v", err)
+	}
+	return path
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func intPtr(value int) *int {
+	return &value
+}
+
 func setFastPollIntervals() func() {
 	oldTask := taskPollInterval
 	oldPower := vmPowerPollInterval
@@ -586,23 +873,24 @@ func assertCallsContainInOrder(t *testing.T, calls, want []string) {
 }
 
 type fakeAPI struct {
-	calls              []string
-	vms                []VMInfo
-	nextID             int
-	nextIDCalls        int
-	storageStatuses    map[string]StorageStatus
-	storageStatusCalls []string
-	volumes            map[string]bool
-	uploads            []StorageUpload
-	deletedVolumes     []string
-	createValues       url.Values
-	updateValues       url.Values
-	templateCalls      int
-	startCalls         int
-	statuses           []string
-	taskErrors         map[string]error
-	stoppedVMs         []int
-	deletedVMs         []int
+	calls               []string
+	vms                 []VMInfo
+	nextID              int
+	nextIDCalls         int
+	storageStatuses     map[string]StorageStatus
+	storageStatusCalls  []string
+	volumes             map[string]bool
+	uploads             []StorageUpload
+	deletedVolumes      []string
+	createValues        url.Values
+	updateValues        url.Values
+	updateValuesHistory []url.Values
+	templateCalls       int
+	startCalls          int
+	statuses            []string
+	taskErrors          map[string]error
+	stoppedVMs          []int
+	deletedVMs          []int
 }
 
 func newFakeAPI() *fakeAPI {
@@ -688,6 +976,7 @@ func (f *fakeAPI) CurrentVMStatus(context.Context, string, int) (VMStatus, error
 func (f *fakeAPI) UpdateVMConfig(_ context.Context, _ string, _ int, values url.Values) (string, error) {
 	f.calls = append(f.calls, "update-config")
 	f.updateValues = cloneValues(values)
+	f.updateValuesHistory = append(f.updateValuesHistory, cloneValues(values))
 	return "update", nil
 }
 

@@ -621,6 +621,97 @@ func TestRunProxmoxAcceptsBridgeFromHardwareConfig(t *testing.T) {
 	}
 }
 
+func TestRunProxmoxBuildRejectsInvalidOptionsBeforeISOCheck(t *testing.T) {
+	dir := t.TempDir()
+	userDataPath := filepath.Join(dir, "user-data.yaml")
+	if err := os.WriteFile(userDataPath, []byte(`#cloud-config
+autoinstall:
+  version: 1
+`), 0o644); err != nil {
+		t.Fatalf("write user-data: %v", err)
+	}
+	hardwareConfigPath := writeTempHardwareConfig(t, "disk_size: 20G\nproxmox:\n  bridge: vmbr0\n")
+	optionsPath := filepath.Join(dir, "options.yaml")
+	if err := os.WriteFile(optionsPath, []byte("boot: order=scsi0\n"), 0o644); err != nil {
+		t.Fatalf("write options: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ubuntu-vm-template-builder",
+		"proxmox",
+		"build",
+		"--iso", "missing.iso",
+		"--user-data", userDataPath,
+		"--hardware-config", hardwareConfigPath,
+		"--proxmox-host", "pve.example.com",
+		"--proxmox-token-id", "root@pam!builder",
+		"--proxmox-token-secret", "secret",
+		"--proxmox-node", "pve",
+		"--proxmox-iso-storage", "local",
+		"--proxmox-disk-storage", "vms",
+		"--options", optionsPath,
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("proxmox build accepted invalid options config")
+	}
+	errOutput := stderr.String()
+	if !strings.Contains(errOutput, "Proxmox options") || !strings.Contains(errOutput, "field boot not found") {
+		t.Fatalf("invalid options error is unexpected:\n%s", errOutput)
+	}
+	if strings.Contains(errOutput, "ubuntu ISO file") {
+		t.Fatalf("proxmox should validate options before checking ISO:\n%s", errOutput)
+	}
+}
+
+func TestRunProxmoxBuildAcceptsOptionFilesBeforeISOCheck(t *testing.T) {
+	dir := t.TempDir()
+	userDataPath := filepath.Join(dir, "user-data.yaml")
+	if err := os.WriteFile(userDataPath, []byte(`#cloud-config
+autoinstall:
+  version: 1
+`), 0o644); err != nil {
+		t.Fatalf("write user-data: %v", err)
+	}
+	hardwareConfigPath := writeTempHardwareConfig(t, "disk_size: 20G\nproxmox:\n  bridge: vmbr0\n")
+	optionsPath := filepath.Join(dir, "options.yaml")
+	if err := os.WriteFile(optionsPath, []byte("start_at_boot: false\n"), 0o644); err != nil {
+		t.Fatalf("write options: %v", err)
+	}
+	cloudInitPath := filepath.Join(dir, "cloud-init.yaml")
+	if err := os.WriteFile(cloudInitPath, []byte("type: nocloud\nupgrade: false\n"), 0o644); err != nil {
+		t.Fatalf("write cloud-init options: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ubuntu-vm-template-builder",
+		"proxmox",
+		"build",
+		"--iso", "missing.iso",
+		"--user-data", userDataPath,
+		"--hardware-config", hardwareConfigPath,
+		"--proxmox-host", "pve.example.com",
+		"--proxmox-token-id", "root@pam!builder",
+		"--proxmox-token-secret", "secret",
+		"--proxmox-node", "pve",
+		"--proxmox-iso-storage", "local",
+		"--proxmox-disk-storage", "vms",
+		"--options", optionsPath,
+		"--cloud-init-options", cloudInitPath,
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("proxmox build unexpectedly reached success with missing ISO")
+	}
+	errOutput := stderr.String()
+	if !strings.Contains(errOutput, "ubuntu ISO file") {
+		t.Fatalf("proxmox should proceed past option parsing to ISO validation:\n%s", errOutput)
+	}
+	if strings.Contains(errOutput, "Proxmox options") || strings.Contains(errOutput, "Proxmox cloud-init options") {
+		t.Fatalf("valid option files were rejected:\n%s", errOutput)
+	}
+}
+
 func TestEffectiveProxmoxBridgePrefersCLI(t *testing.T) {
 	hardware := common.DefaultHardwareConfig()
 	hardware.DiskSize = "20G"
@@ -863,7 +954,7 @@ func TestCommandUsageMentionsHardwareConfig(t *testing.T) {
 
 	out.Reset()
 	printProxmoxBuildUsage(&out, "ubuntu-vm-template-builder")
-	if output := out.String(); !strings.Contains(output, "--hardware-config") || !strings.Contains(output, "--install-extra-packages") || !strings.Contains(output, "proxmox build") || !strings.Contains(output, "--proxmox-host") || !strings.Contains(output, "--proxmox-iso-storage") || !strings.Contains(output, "--proxmox-disk-storage") || strings.Contains(output, "--proxmox-storage") || strings.Contains(output, "--disk-size") || strings.Contains(output, "--vm-cpu") || strings.Contains(output, "--vm-memory-mb") {
+	if output := out.String(); !strings.Contains(output, "--hardware-config") || !strings.Contains(output, "--install-extra-packages") || !strings.Contains(output, "--options") || !strings.Contains(output, "--cloud-init-options") || !strings.Contains(output, "proxmox build") || !strings.Contains(output, "--proxmox-host") || !strings.Contains(output, "--proxmox-iso-storage") || !strings.Contains(output, "--proxmox-disk-storage") || strings.Contains(output, "--proxmox-storage") || strings.Contains(output, "--disk-size") || strings.Contains(output, "--vm-cpu") || strings.Contains(output, "--vm-memory-mb") {
 		t.Fatalf("proxmox build usage should mention --hardware-config and not removed hardware flags:\n%s", output)
 	}
 }

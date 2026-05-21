@@ -31,14 +31,16 @@ const (
 )
 
 type Config struct {
-	UbuntuISO     string
-	UserDataPath  string
-	UserData      []byte
-	DiskSize      string
-	DisplayName   string
-	Hardware      common.HardwareConfig
-	ExtraPackages offlineapt.Config
-	Proxmox       ConnectionConfig
+	UbuntuISO        string
+	UserDataPath     string
+	UserData         []byte
+	DiskSize         string
+	DisplayName      string
+	Hardware         common.HardwareConfig
+	ExtraPackages    offlineapt.Config
+	Options          OptionsConfig
+	CloudInitOptions CloudInitOptionsConfig
+	Proxmox          ConnectionConfig
 }
 
 type ConnectionConfig struct {
@@ -224,6 +226,12 @@ func (i *Installer) installWithClient(ctx context.Context, client api, createIns
 	if err := finalizePostInstallConfig(ctx, client, i.cfg, cfg.Node, vmid); err != nil {
 		return err
 	}
+	if err := applyCloudInitOptions(ctx, client, i.cfg, cfg.Node, vmid); err != nil {
+		return err
+	}
+	if err := applyVMOptions(ctx, client, i.cfg, cfg.Node, vmid); err != nil {
+		return err
+	}
 	if err := maybeConvertToTemplate(ctx, client, cfg.Node, vmid, i.cfg.Hardware.Proxmox.OutputType); err != nil {
 		return err
 	}
@@ -313,6 +321,9 @@ func preflightBuildStorages(ctx context.Context, client api, cfg ConnectionConfi
 	requirements := map[string]*storagePreflightRequirement{}
 	addStorageRequirement(requirements, cfg.ISOStorage, "ISO", UploadContentISO, isoInfo.Size())
 	addStorageRequirement(requirements, cfg.DiskStorage, "disk", "images", diskBytes)
+	if buildCfg.CloudInitOptions.Enabled {
+		addStorageRequirement(requirements, cfg.DiskStorage, "cloud-init", "images", cloudInitDiskBytes)
+	}
 
 	var storages []string
 	for storage := range requirements {
@@ -560,6 +571,52 @@ func finalizePostInstallConfig(ctx context.Context, client api, cfg Config, node
 		return fmt.Errorf("wait for post-install VM finalization: %w", err)
 	}
 	fmt.Printf("OK post-install VM config finalized (removed installer ISO and serial console; boot order is %s-only)\n", diskDeviceKey(cfg.Hardware.Normalize().Proxmox.DiskInterface))
+	return nil
+}
+
+func applyCloudInitOptions(ctx context.Context, client api, cfg Config, node string, vmid int) error {
+	if !cfg.CloudInitOptions.Enabled {
+		return nil
+	}
+	values, err := BuildCloudInitValues(cfg)
+	if err != nil {
+		return err
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	fmt.Println("Applying Proxmox Cloud-Init options...")
+	upID, err := client.UpdateVMConfig(ctx, node, vmid, values)
+	if err != nil {
+		return fmt.Errorf("apply Proxmox Cloud-Init options: %w", err)
+	}
+	if err := client.WaitTask(ctx, node, upID); err != nil {
+		return fmt.Errorf("wait for Proxmox Cloud-Init options: %w", err)
+	}
+	fmt.Println("OK Proxmox Cloud-Init options applied")
+	return nil
+}
+
+func applyVMOptions(ctx context.Context, client api, cfg Config, node string, vmid int) error {
+	if !cfg.Options.Enabled {
+		return nil
+	}
+	values, err := BuildOptionsValues(cfg)
+	if err != nil {
+		return err
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	fmt.Println("Applying Proxmox VM options...")
+	upID, err := client.UpdateVMConfig(ctx, node, vmid, values)
+	if err != nil {
+		return fmt.Errorf("apply Proxmox VM options: %w", err)
+	}
+	if err := client.WaitTask(ctx, node, upID); err != nil {
+		return fmt.Errorf("wait for Proxmox VM options: %w", err)
+	}
+	fmt.Println("OK Proxmox VM options applied")
 	return nil
 }
 
