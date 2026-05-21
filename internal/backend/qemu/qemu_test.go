@@ -46,6 +46,28 @@ func TestRunInterruptibleCommandStopsProcessOnInterrupt(t *testing.T) {
 	}
 }
 
+func TestInstallerFailureDetectorFindsSplitSubiquityMarker(t *testing.T) {
+	detector := &installerFailureDetector{}
+
+	if _, err := detector.Write([]byte("start: subiquity/ErrorReporter/1779379882.install_")); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if err := detector.Err(); err != nil {
+		t.Fatalf("Err returned %v before complete marker", err)
+	}
+	if _, err := detector.Write([]byte("fail/add_info:\n")); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+
+	err := detector.Err()
+	if err == nil {
+		t.Fatal("Err returned nil after install failure marker")
+	}
+	if !strings.Contains(err.Error(), "install_fail/add_info") {
+		t.Fatalf("Err = %q, want detected marker", err.Error())
+	}
+}
+
 func TestQEMUArgsUseNographicSerialConsole(t *testing.T) {
 	hardware := common.DefaultHardwareConfig()
 	hardware.BootFirmware = common.BootFirmwareBIOS

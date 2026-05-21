@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -466,6 +467,49 @@ func signalToSyscall(sig os.Signal) syscall.Signal {
 	return syscall.SIGTERM
 }
 
+var installerFailureMarkers = []string{
+	"An error occurred. Press enter to start a shell",
+	"install_fail.crash",
+	"install_fail/add_info",
+}
+
+type installerFailureDetector struct {
+	mu     sync.Mutex
+	tail   string
+	marker string
+}
+
+func (d *installerFailureDetector) Write(p []byte) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.marker == "" {
+		combined := d.tail + string(p)
+		for _, marker := range installerFailureMarkers {
+			if strings.Contains(combined, marker) {
+				d.marker = marker
+				break
+			}
+		}
+		if len(combined) > 4096 {
+			combined = combined[len(combined)-4096:]
+		}
+		d.tail = combined
+	}
+
+	return len(p), nil
+}
+
+func (d *installerFailureDetector) Err() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.marker == "" {
+		return nil
+	}
+	return fmt.Errorf("installer console reported failure marker %q", d.marker)
+}
+
 func (i *Installer) QEMUArgs(seedISOPath, kernelPath, initrdPath string) ([]string, error) {
 	args := []string{
 		"--enable-kvm",
@@ -546,8 +590,9 @@ func (i *Installer) runQemuInstallation(seedISOPath, kernelPath, initrdPath stri
 	cmd := exec.Command("qemu-system-x86_64", args...)
 	stdoutLog := qemulog.NewCompactingWriter(os.Stdout)
 	stderrLog := qemulog.NewCompactingWriter(os.Stderr)
-	cmd.Stdout = stdoutLog
-	cmd.Stderr = stderrLog
+	failureDetector := &installerFailureDetector{}
+	cmd.Stdout = io.MultiWriter(stdoutLog, failureDetector)
+	cmd.Stderr = io.MultiWriter(stderrLog, failureDetector)
 
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
@@ -559,6 +604,9 @@ func (i *Installer) runQemuInstallation(seedISOPath, kernelPath, initrdPath stri
 	}
 	if flushErr := stderrLog.Flush(); flushErr != nil && err == nil {
 		err = flushErr
+	}
+	if detectorErr := failureDetector.Err(); detectorErr != nil && err == nil {
+		err = detectorErr
 	}
 	if err == nil {
 		fmt.Println("OK installation completed successfully")
