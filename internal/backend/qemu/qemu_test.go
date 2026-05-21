@@ -200,14 +200,20 @@ autoinstall:
 		t.Fatalf("read seed user-data: %v", err)
 	}
 	for _, want := range []string{
-		"signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg check-date=no",
-		"file:/var/lib/ubuntu-vm-template-builder/offline-apt noble main",
-		"-y install",
-		"git",
+		"/cdrom/ubuntu-vm-template-builder/scripts/install-offline-packages.sh",
+		"/cdrom/ubuntu-vm-template-builder/offline-apt",
+		"/cdrom/ubuntu-vm-template-builder/offline-apt-install",
+		"/cdrom/ubuntu-vm-template-builder/scripts/prepare-cloud-init-template.sh",
+		"/cdrom/ubuntu-vm-template-builder/scripts/cleanup-installed-grub.sh",
 		"echo user command",
 	} {
 		if !strings.Contains(string(userData), want) {
 			t.Fatalf("seed user-data missing %q in:\n%s", want, userData)
+		}
+	}
+	for _, absent := range []string{"signed-by=", "file:/var/lib/ubuntu-vm-template-builder/offline-apt noble main", "-y install"} {
+		if strings.Contains(string(userData), absent) {
+			t.Fatalf("seed user-data contains inline offline install detail %q in:\n%s", absent, userData)
 		}
 	}
 }

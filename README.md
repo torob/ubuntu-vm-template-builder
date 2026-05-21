@@ -4,9 +4,10 @@ Builds reproducible Ubuntu VM template disk images in QEMU, vCenter VMs and
 templates directly on ESXi hardware, or Proxmox VE VMs and templates on a
 selected node, using a cloud-init autoinstall file that you provide directly.
 
-The `qemu` command creates a NoCloud seed ISO containing your `user-data`,
-creates the destination disk image, extracts the Ubuntu ISO kernel and initrd,
-and boots QEMU with `autoinstall ---`. The `vcenter` and `proxmox` commands
+The `qemu` command remasters the Ubuntu ISO with builder support scripts,
+creates a NoCloud seed ISO containing your `user-data`, creates the destination
+disk image, extracts the Ubuntu ISO kernel and initrd, and boots QEMU with
+`autoinstall ---`. The `vcenter` and `proxmox` commands
 remaster the Ubuntu ISO with NoCloud seed data, boot a temporary VM on the
 selected virtualization host, wait for the installer to power off, and leave
 the guest as a VM or convert it to a platform template.
@@ -22,9 +23,8 @@ resulting image into your virtualization platform as a template.
 - `qemu-img` when creating `qcow2` or `vmdk` images
 - OVMF UEFI firmware for the default `boot_firmware: uefi` hardware config
 - Accessible `/dev/kvm`, because QEMU is launched with `--enable-kvm`
-- `xorriso` when using the `vcenter` or `proxmox` command
-- `apt-get`, `xorriso`, and the Ubuntu archive keyring when using
-  `--install-extra-packages`
+- `xorriso` when using any build backend
+- `apt-get` and the Ubuntu archive keyring when using `--install-extra-packages`
 - An Ubuntu live-server ISO containing `/casper/vmlinuz` and `/casper/initrd`
 
 ## Usage
@@ -404,7 +404,9 @@ builder applies Proxmox's required API encoding.
 closure, downloads those `.deb` files on the host with Ubuntu signature and hash
 verification enabled, embeds only those `.deb` files plus Ubuntu's signed
 `dists/...` metadata in the remastered installer ISO, and adds late-commands
-that install from `/cdrom/ubuntu-vm-template-builder/offline-apt`.
+that run an injected builder script to install from
+`/cdrom/ubuntu-vm-template-builder/offline-apt`. Temporary APT files copied
+into the target guest are removed before the installer finishes.
 
 Example config:
 

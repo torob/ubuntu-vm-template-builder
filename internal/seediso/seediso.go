@@ -3,6 +3,7 @@ package seediso
 import (
 	"bytes"
 	"context"
+	"embed"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,9 @@ import (
 	"ubuntu-vm-template-builder/internal/offlineapt"
 )
 
+//go:embed scripts/*.sh
+var supportScripts embed.FS
+
 const (
 	NoCloudKernelArg        = "ds=nocloud;s=/cdrom/nocloud/"
 	GrubNoCloudKernelArg    = "ds=nocloud\\;s=/cdrom/nocloud/"
@@ -25,22 +29,22 @@ const (
 	GrubTimeoutSetting      = "set timeout=0"
 	SyslinuxPromptSetting   = "prompt 0"
 	SyslinuxTimeoutSetting  = "timeout 1"
+	BuilderISOPath          = "/ubuntu-vm-template-builder"
+	ScriptsISOPath          = BuilderISOPath + "/scripts"
 )
 
-var InstalledGuestGRUBCleanupScript = strings.Join([]string{
-	`set -eu`,
-	`file=${GRUB_DEFAULT_FILE:-/etc/default/grub}`,
-	`[ -f "$file" ] || exit 0`,
-	`line=$(grep -m1 "^GRUB_CMDLINE_LINUX_DEFAULT=" "$file" || true)`,
-	`[ -n "$line" ] || exit 0`,
-	`value=${line#GRUB_CMDLINE_LINUX_DEFAULT=}`,
-	`value=${value#\"}`,
-	`value=${value%\"}`,
-	`clean=""`,
-	`for arg in $value; do case "$arg" in console=tty0|console=ttyS0,115200n8|autoinstall|ds=nocloud\;s=/cdrom/nocloud/|ds=nocloud\\\;s=/cdrom/nocloud/) continue ;; esac; if [ -n "$clean" ]; then clean="$clean $arg"; else clean="$arg"; fi; done`,
-	`escaped=$(printf "%s\n" "$clean" | sed "s/[\/&]/\\\\&/g")`,
-	`sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$escaped\"|" "$file"`,
-}, "; ")
+const (
+	installOfflinePackagesScriptName   = "install-offline-packages.sh"
+	cleanupInstalledGRUBScriptName     = "cleanup-installed-grub.sh"
+	prepareCloudInitTemplateScriptName = "prepare-cloud-init-template.sh"
+)
+
+const (
+	cleanupInstalledGRUBScriptISOPath     = ScriptsISOPath + "/" + cleanupInstalledGRUBScriptName
+	prepareCloudInitTemplateScriptISOPath = ScriptsISOPath + "/" + prepareCloudInitTemplateScriptName
+)
+
+var InstalledGuestGRUBCleanupScript = mustReadSupportScript(cleanupInstalledGRUBScriptName)
 
 type Options struct {
 	ExtraPackages offlineapt.InstallConfig
@@ -57,13 +61,65 @@ func RemasterUbuntuISOWithNoCloud(ctx context.Context, sourceISO, outputISO stri
 		return err
 	}
 
-	mappings := []isoutil.FileMapping{{LocalPath: seedDir, ISOPath: "/nocloud"}}
+	supportMappings, err := SupportFileMappings(workDir, options)
+	if err != nil {
+		return err
+	}
+
+	mappings := append([]isoutil.FileMapping{}, supportMappings...)
+	mappings = append(mappings, isoutil.FileMapping{LocalPath: seedDir, ISOPath: "/nocloud"})
 	if strings.TrimSpace(offlineRepoPath) != "" {
 		mappings = append(mappings, isoutil.FileMapping{LocalPath: offlineRepoPath, ISOPath: offlineapt.ISORepoPath})
 	}
 	mappings = append(mappings, bootMappings...)
 
 	return isoutil.RemasterISO(ctx, sourceISO, outputISO, mappings)
+}
+
+func RemasterUbuntuISOWithSupport(ctx context.Context, sourceISO, outputISO, workDir, offlineRepoPath string, options Options) error {
+	mappings, err := SupportFileMappings(workDir, options)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(offlineRepoPath) != "" {
+		mappings = append(mappings, isoutil.FileMapping{LocalPath: offlineRepoPath, ISOPath: offlineapt.ISORepoPath})
+	}
+	return isoutil.RemasterISO(ctx, sourceISO, outputISO, mappings)
+}
+
+func SupportFileMappings(workDir string, options Options) ([]isoutil.FileMapping, error) {
+	baseDir := filepath.Join(workDir, "builder-support")
+	if err := os.RemoveAll(baseDir); err != nil {
+		return nil, fmt.Errorf("reset builder support directory: %w", err)
+	}
+
+	scriptsDir := filepath.Join(baseDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create builder support scripts directory: %w", err)
+	}
+	for _, name := range []string{
+		installOfflinePackagesScriptName,
+		cleanupInstalledGRUBScriptName,
+		prepareCloudInitTemplateScriptName,
+	} {
+		data, err := supportScripts.ReadFile("scripts/" + name)
+		if err != nil {
+			return nil, fmt.Errorf("read embedded support script %s: %w", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(scriptsDir, name), data, 0o644); err != nil {
+			return nil, fmt.Errorf("write builder support script %s: %w", name, err)
+		}
+	}
+
+	mappings := []isoutil.FileMapping{{LocalPath: scriptsDir, ISOPath: ScriptsISOPath}}
+	if options.ExtraPackages.Enabled() {
+		configDir := filepath.Join(baseDir, "offline-apt-install")
+		if err := offlineapt.WriteInstallConfigDir(configDir, options.ExtraPackages); err != nil {
+			return nil, err
+		}
+		mappings = append(mappings, isoutil.FileMapping{LocalPath: configDir, ISOPath: offlineapt.ISOInstallConfigPath})
+	}
+	return mappings, nil
 }
 
 func CreateNoCloudSeedDir(workDir string, userData []byte, displayName string, options Options) (string, error) {
@@ -107,7 +163,7 @@ func TransformUserDataWithOptions(userData []byte, options Options) ([]byte, err
 	if err := offlineapt.PrependInstallLateCommands(autoinstall, options.ExtraPackages); err != nil {
 		return nil, err
 	}
-	if err := appendInstalledGuestGRUBCleanupLateCommands(autoinstall); err != nil {
+	if err := appendBuilderSupportLateCommands(autoinstall); err != nil {
 		return nil, err
 	}
 
@@ -125,7 +181,7 @@ func TransformUserDataWithOptions(userData []byte, options Options) ([]byte, err
 	return common.EnsureCloudConfigHeader(out.Bytes()), nil
 }
 
-func appendInstalledGuestGRUBCleanupLateCommands(autoinstall *yaml.Node) error {
+func appendBuilderSupportLateCommands(autoinstall *yaml.Node) error {
 	lateCommands := common.MappingValue(autoinstall, "late-commands")
 	if lateCommands == nil {
 		lateCommands = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
@@ -137,7 +193,7 @@ func appendInstalledGuestGRUBCleanupLateCommands(autoinstall *yaml.Node) error {
 		return errors.New("autoinstall.late-commands must be a sequence when present")
 	}
 
-	for _, command := range InstalledGuestGRUBCleanupLateCommands() {
+	for _, command := range BuilderSupportLateCommands() {
 		lateCommands.Content = append(lateCommands.Content, &yaml.Node{
 			Kind:  yaml.ScalarNode,
 			Tag:   "!!str",
@@ -147,11 +203,31 @@ func appendInstalledGuestGRUBCleanupLateCommands(autoinstall *yaml.Node) error {
 	return nil
 }
 
+func BuilderSupportLateCommands() []string {
+	var commands []string
+	commands = append(commands, PrepareCloudInitTemplateLateCommands()...)
+	commands = append(commands, InstalledGuestGRUBCleanupLateCommands()...)
+	return commands
+}
+
+func PrepareCloudInitTemplateLateCommands() []string {
+	return []string{scriptLateCommand(prepareCloudInitTemplateScriptISOPath)}
+}
+
 func InstalledGuestGRUBCleanupLateCommands() []string {
-	return []string{
-		"curtin in-target --target=/target -- sh -c '" + InstalledGuestGRUBCleanupScript + "'",
-		"curtin in-target --target=/target -- update-grub",
+	return []string{scriptLateCommand(cleanupInstalledGRUBScriptISOPath)}
+}
+
+func scriptLateCommand(isoPath string) string {
+	return "sh /cdrom" + isoPath + " /target"
+}
+
+func mustReadSupportScript(name string) string {
+	data, err := supportScripts.ReadFile("scripts/" + name)
+	if err != nil {
+		panic(err)
 	}
+	return string(data)
 }
 
 func prepareBootConfigMappings(sourceISO, workDir string) ([]isoutil.FileMapping, error) {

@@ -20,6 +20,8 @@ import (
 
 const (
 	ISORepoPath            = "/ubuntu-vm-template-builder/offline-apt"
+	ISOInstallConfigPath   = "/ubuntu-vm-template-builder/offline-apt-install"
+	ISOInstallScriptPath   = "/ubuntu-vm-template-builder/scripts/install-offline-packages.sh"
 	guestRepoPath          = "/var/lib/ubuntu-vm-template-builder/offline-apt"
 	targetRepoPath         = "/target" + guestRepoPath
 	targetSourceList       = "/etc/apt/sources.list.d/ubuntu-vm-template-builder-offline.list"
@@ -436,55 +438,55 @@ func InstallLateCommands(install InstallConfig) []string {
 		return nil
 	}
 
-	packageArgs := shellJoin(install.Packages)
-	aptOptions := strings.Join([]string{
-		"-o Dir::Etc::sourcelist=" + shellQuote(targetSourceList),
-		"-o Dir::Etc::sourceparts=" + shellQuote(targetSourceParts),
-		"-o Apt::Get::List-Cleanup=0",
-		"-o Acquire::Languages=none",
-		"-o " + dep11IndexTargetOption,
-		"-o " + cnfIndexTargetOption,
-	}, " ")
+	return []string{strings.Join([]string{
+		"sh",
+		shellQuote("/cdrom" + ISOInstallScriptPath),
+		shellQuote("/target"),
+		shellQuote("/cdrom" + ISORepoPath),
+		shellQuote("/cdrom" + ISOInstallConfigPath),
+	}, " ")}
+}
 
-	var sourceLines []string
+func WriteInstallConfigDir(path string, install InstallConfig) error {
+	if !install.Enabled() {
+		return nil
+	}
+	if err := install.Validate(); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return fmt.Errorf("create offline APT install config directory: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "packages"), []byte(strings.Join(install.Packages, "\n")+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write offline APT package list: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "sources.list"), []byte(strings.Join(installSourceLines(install), "\n")+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write offline APT sources.list: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "required-indexes"), []byte(strings.Join(installRequiredIndexPaths(install), "\n")+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write offline APT required indexes: %w", err)
+	}
+	return nil
+}
+
+func installSourceLines(install InstallConfig) []string {
+	var lines []string
 	for _, source := range install.Sources {
 		components := strings.Join(source.Components, " ")
-		sourceLines = append(sourceLines, fmt.Sprintf("deb [signed-by=%s check-date=no] file:%s %s %s", ubuntuArchiveKeyring, guestRepoPath, source.Suite, components))
+		lines = append(lines, fmt.Sprintf("deb [signed-by=%s check-date=no] file:%s %s %s", ubuntuArchiveKeyring, guestRepoPath, source.Suite, components))
 	}
+	return lines
+}
 
-	var lines []string
-	lines = append(lines,
-		"set -eux",
-		"repo_src="+shellQuote("/cdrom"+ISORepoPath),
-		"repo_dst="+shellQuote(targetRepoPath),
-		"source_list="+shellQuote("/target"+targetSourceList),
-		"source_parts="+shellQuote("/target"+targetSourceParts),
-		"keyring="+shellQuote("/target"+ubuntuArchiveKeyring),
-		`[ -r "$keyring" ] || { echo "missing Ubuntu archive keyring: $keyring"; exit 1; }`,
-		`[ -d "$repo_src" ] || { echo "missing embedded offline APT repo: $repo_src"; ls -la /cdrom || true; ls -la /cdrom/ubuntu-vm-template-builder || true; exit 1; }`,
-		`rm -rf "$repo_dst"`,
-		`mkdir -p "$repo_dst" "$(dirname "$source_list")" "$source_parts"`,
-		`cp -a "$repo_src/." "$repo_dst/"`,
-		`chmod -R a+rX "$repo_dst"`,
-		`find "$repo_dst/pool" -type f -name '*.deb' | grep -q . || { echo "embedded offline APT repo has no .deb files"; find "$repo_dst" -maxdepth 5 -type f | sort; exit 1; }`,
-	)
+func installRequiredIndexPaths(install InstallConfig) []string {
+	var paths []string
 	for _, source := range install.Sources {
-		lines = append(lines, fmt.Sprintf("[ -r \"$repo_dst/dists/%s/InRelease\" ] || { echo %s; find \"$repo_dst/dists\" -maxdepth 4 -type f | sort; exit 1; }", source.Suite, shellQuote("missing signed InRelease for suite "+source.Suite)))
+		paths = append(paths, fmt.Sprintf("dists/%s/InRelease", source.Suite))
 		for _, component := range source.Components {
-			indexPath := fmt.Sprintf("dists/%s/%s/binary-%s/Packages", source.Suite, component, aptArchitecture)
-			lines = append(lines, fmt.Sprintf("[ -r \"$repo_dst/%s\" ] || { echo %s; find \"$repo_dst/dists/%s\" -maxdepth 4 -type f | sort; exit 1; }", indexPath, shellQuote("missing package index "+indexPath), source.Suite))
+			paths = append(paths, fmt.Sprintf("dists/%s/%s/binary-%s/Packages", source.Suite, component, aptArchitecture))
 		}
 	}
-	lines = append(lines,
-		fmt.Sprintf("printf '%%s\\n' %s > \"$source_list\"", shellJoin(sourceLines)),
-		fmt.Sprintf("curtin in-target --target=/target -- apt-get %s update", aptOptions),
-		fmt.Sprintf("curtin in-target --target=/target -- apt-get %s -y install %s", aptOptions, packageArgs),
-		`rm -f "$source_list"`,
-		`rm -rf "$source_parts" "$repo_dst"`,
-		`rmdir "$(dirname "$repo_dst")" 2>/dev/null || true`,
-	)
-
-	return []string{"sh -ceu " + shellQuote(strings.Join(lines, "\n"))}
+	return paths
 }
 
 func ValidateRepository(repo Repository) error {

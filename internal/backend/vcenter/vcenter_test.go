@@ -74,7 +74,7 @@ autoinstall:
 		t.Fatalf("parse transformed user-data: %v", err)
 	}
 	commands := lateCommandValues(t, autoinstall)
-	wantCommands := installedGuestGRUBCleanupLateCommands()
+	wantCommands := builderSupportLateCommands()
 	want := append([]string{"echo user command"}, wantCommands...)
 	if strings.Join(commands, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("late-commands = %#v, want %#v", commands, want)
@@ -97,7 +97,7 @@ autoinstall:
 		t.Fatalf("parse transformed user-data: %v", err)
 	}
 	commands := lateCommandValues(t, autoinstall)
-	want := installedGuestGRUBCleanupLateCommands()
+	want := builderSupportLateCommands()
 	if strings.Join(commands, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("late-commands = %#v, want %#v", commands, want)
 	}
@@ -133,9 +133,9 @@ autoinstall:
 
 	commands := lateCommandValues(t, autoinstall)
 	extraCommands := offlineapt.InstallLateCommands(install)
-	grubCommands := installedGuestGRUBCleanupLateCommands()
+	supportCommands := builderSupportLateCommands()
 	want := append(append([]string{}, extraCommands...), "echo user command")
-	want = append(want, grubCommands...)
+	want = append(want, supportCommands...)
 	if strings.Join(commands, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("late-commands = %#v, want %#v", commands, want)
 	}
@@ -198,7 +198,7 @@ func TestInstalledGuestGRUBCleanupScriptRemovesOnlyBuilderArgs(t *testing.T) {
 			}
 
 			cmd := exec.Command("sh", "-c", installedGuestGRUBCleanupScript)
-			cmd.Env = append(os.Environ(), "GRUB_DEFAULT_FILE="+grubPath)
+			cmd.Env = append(os.Environ(), "GRUB_DEFAULT_FILE="+grubPath, "SKIP_UPDATE_GRUB=1")
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("cleanup script failed: %v\n%s", err, out)
 			}

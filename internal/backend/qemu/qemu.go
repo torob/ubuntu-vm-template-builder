@@ -23,9 +23,9 @@ import (
 	"golang.org/x/sys/unix"
 
 	"ubuntu-vm-template-builder/internal/common"
-	"ubuntu-vm-template-builder/internal/isoutil"
 	"ubuntu-vm-template-builder/internal/offlineapt"
 	"ubuntu-vm-template-builder/internal/qemulog"
+	"ubuntu-vm-template-builder/internal/seediso"
 )
 
 const (
@@ -157,6 +157,9 @@ func CheckPrerequisites(cfg Config) error {
 	}
 	if _, err := exec.LookPath("qemu-system-x86_64"); err != nil {
 		return errors.New("missing required dependency: qemu-system-x86_64")
+	}
+	if _, err := exec.LookPath("xorriso"); err != nil {
+		return errors.New("missing required dependency: xorriso")
 	}
 	diskFormat := strings.ToLower(strings.TrimSpace(cfg.DiskFormat))
 	if diskFormat == "" {
@@ -295,13 +298,9 @@ func (i *Installer) createSeedISO() (string, error) {
 	}
 	defer fs.Close()
 
-	seedUserData := i.userData
-	if i.extraPackages.Enabled() {
-		var err error
-		seedUserData, err = offlineapt.TransformUserData(i.userData, i.offlineRepo.InstallConfig())
-		if err != nil {
-			return "", fmt.Errorf("prepare extra package seed user-data: %w", err)
-		}
+	seedUserData, err := seediso.TransformUserDataWithOptions(i.userData, seediso.Options{ExtraPackages: i.offlineRepo.InstallConfig()})
+	if err != nil {
+		return "", fmt.Errorf("prepare seed user-data: %w", err)
 	}
 
 	if err := writeISOFile(fs, "/user-data", seedUserData); err != nil {
@@ -497,23 +496,20 @@ func (i *Installer) QEMUArgs(seedISOPath, kernelPath, initrdPath string) ([]stri
 }
 
 func (i *Installer) prepareInstallerISO(ctx context.Context) error {
-	if !i.extraPackages.Enabled() {
-		i.installerISO = i.ubuntuISO
-		return nil
+	var repo offlineapt.Repository
+	if i.extraPackages.Enabled() {
+		fmt.Println("Preparing offline APT repository for extra packages...")
+		var err error
+		repo, err = offlineapt.BuildRepository(ctx, i.extraPackages, i.ubuntuISO, i.tempDir)
+		if err != nil {
+			return fmt.Errorf("prepare offline APT repository: %w", err)
+		}
+		fmt.Printf("OK offline APT repository prepared with %d requested package(s): %s\n", len(repo.Packages), repo.Path)
 	}
-
-	fmt.Println("Preparing offline APT repository for extra packages...")
-	repo, err := offlineapt.BuildRepository(ctx, i.extraPackages, i.ubuntuISO, i.tempDir)
-	if err != nil {
-		return fmt.Errorf("prepare offline APT repository: %w", err)
-	}
-	fmt.Printf("OK offline APT repository prepared with %d requested package(s): %s\n", len(repo.Packages), repo.Path)
 
 	remasteredISO := filepath.Join(i.tempDir, fmt.Sprintf("installer-%s.iso", common.SafeName(i.display)))
-	fmt.Println("Creating remastered installer ISO with offline APT repository...")
-	if err := isoutil.RemasterISO(ctx, i.ubuntuISO, remasteredISO, []isoutil.FileMapping{
-		{LocalPath: repo.Path, ISOPath: offlineapt.ISORepoPath},
-	}); err != nil {
+	fmt.Println("Creating remastered installer ISO with builder support scripts...")
+	if err := seediso.RemasterUbuntuISOWithSupport(ctx, i.ubuntuISO, remasteredISO, i.tempDir, repo.Path, seediso.Options{ExtraPackages: repo.InstallConfig()}); err != nil {
 		return err
 	}
 	if err := offlineapt.ValidateEmbeddedRepository(remasteredISO, repo); err != nil {

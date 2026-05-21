@@ -237,8 +237,8 @@ func TestPrerequisiteCollectorsAreBackendSpecific(t *testing.T) {
 	if !prerequisiteNamesContain(qemuReport, "qemu-system-x86_64") {
 		t.Fatalf("QEMU prerequisites missing qemu-system-x86_64: %+v", qemuReport.Items)
 	}
-	if prerequisiteNamesContain(qemuReport, "xorriso") {
-		t.Fatalf("QEMU prerequisites unexpectedly include xorriso: %+v", qemuReport.Items)
+	if !prerequisiteNamesContain(qemuReport, "xorriso") {
+		t.Fatalf("QEMU prerequisites missing xorriso: %+v", qemuReport.Items)
 	}
 	for _, input := range qemuReport.InputPrerequisites {
 		if strings.Contains(strings.ToLower(input), "vcenter") {

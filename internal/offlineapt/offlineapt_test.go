@@ -110,67 +110,100 @@ autoinstall:
 }
 
 func TestInstallLateCommandsUseUbuntuSignedRepoSubset(t *testing.T) {
-	commands := InstallLateCommands(InstallConfig{
+	install := InstallConfig{
 		Packages: []string{"git", "curl"},
 		Sources: []RepositorySource{
 			{Suite: "noble", Components: []string{"main", "universe"}},
 			{Suite: "noble-security", Components: []string{"main", "universe"}},
 		},
-	})
+	}
+	commands := InstallLateCommands(install)
 	if len(commands) != 1 {
 		t.Fatalf("InstallLateCommands returned %d commands, want 1", len(commands))
 	}
 	command := commands[0]
 	for _, want := range []string{
+		"/cdrom/ubuntu-vm-template-builder/scripts/install-offline-packages.sh",
 		"/cdrom/ubuntu-vm-template-builder/offline-apt",
-		"/target/var/lib/ubuntu-vm-template-builder/offline-apt",
-		"signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg check-date=no",
-		"file:/var/lib/ubuntu-vm-template-builder/offline-apt noble main universe",
-		"file:/var/lib/ubuntu-vm-template-builder/offline-apt noble-security main universe",
-		"curtin in-target --target=/target -- apt-get",
-		dep11IndexTargetOption,
-		cnfIndexTargetOption,
-		"-y install",
-		`rmdir "$(dirname "$repo_dst")" 2>/dev/null || true`,
-		"git",
-		"curl",
+		"/cdrom/ubuntu-vm-template-builder/offline-apt-install",
+		"/target",
 	} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("offline install command missing %q in:\n%s", want, command)
 		}
 	}
-	for _, absent := range []string{"trusted=yes", "mount --bind", "dpkg-scanpackages"} {
+	for _, absent := range []string{"trusted=yes", "mount --bind", "dpkg-scanpackages", "signed-by=", "-y install", "git", "curl"} {
 		if strings.Contains(command, absent) {
-			t.Fatalf("offline install command contains %q:\n%s", absent, command)
+			t.Fatalf("offline install command contains generated script detail %q:\n%s", absent, command)
+		}
+	}
+
+	configDir := filepath.Join(t.TempDir(), "offline-apt-install")
+	if err := WriteInstallConfigDir(configDir, install); err != nil {
+		t.Fatalf("WriteInstallConfigDir returned error: %v", err)
+	}
+	packages := readTestFile(t, filepath.Join(configDir, "packages"))
+	sources := readTestFile(t, filepath.Join(configDir, "sources.list"))
+	requiredIndexes := readTestFile(t, filepath.Join(configDir, "required-indexes"))
+	if packages != "git\ncurl\n" {
+		t.Fatalf("packages config = %q", packages)
+	}
+	for _, want := range []string{
+		"signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg check-date=no",
+		"file:/var/lib/ubuntu-vm-template-builder/offline-apt noble main universe",
+		"file:/var/lib/ubuntu-vm-template-builder/offline-apt noble-security main universe",
+	} {
+		if !strings.Contains(sources, want) {
+			t.Fatalf("offline sources config missing %q in:\n%s", want, sources)
+		}
+	}
+	for _, want := range []string{
+		"dists/noble/InRelease",
+		"dists/noble/main/binary-amd64/Packages",
+		"dists/noble/universe/binary-amd64/Packages",
+		"dists/noble-security/InRelease",
+		"dists/noble-security/main/binary-amd64/Packages",
+		"dists/noble-security/universe/binary-amd64/Packages",
+	} {
+		if !strings.Contains(requiredIndexes, want) {
+			t.Fatalf("offline required-indexes config missing %q in:\n%s", want, requiredIndexes)
 		}
 	}
 }
 
 func TestInstallLateCommandsUseEffectiveComponentsPerSuite(t *testing.T) {
-	commands := InstallLateCommands(InstallConfig{
+	install := InstallConfig{
 		Packages: []string{"git"},
 		Sources: []RepositorySource{
 			{Suite: "noble", Components: []string{"main", "universe"}},
 			{Suite: "noble-updates", Components: []string{"main"}},
 		},
-	})
-	if len(commands) != 1 {
-		t.Fatalf("InstallLateCommands returned %d commands, want 1", len(commands))
 	}
-	command := commands[0]
+	configDir := filepath.Join(t.TempDir(), "offline-apt-install")
+	if err := WriteInstallConfigDir(configDir, install); err != nil {
+		t.Fatalf("WriteInstallConfigDir returned error: %v", err)
+	}
+	sources := readTestFile(t, filepath.Join(configDir, "sources.list"))
+	requiredIndexes := readTestFile(t, filepath.Join(configDir, "required-indexes"))
 	for _, want := range []string{
 		"file:/var/lib/ubuntu-vm-template-builder/offline-apt noble main universe",
 		"file:/var/lib/ubuntu-vm-template-builder/offline-apt noble-updates main",
+	} {
+		if !strings.Contains(sources, want) {
+			t.Fatalf("offline sources config missing %q in:\n%s", want, sources)
+		}
+	}
+	for _, want := range []string{
 		"dists/noble/main/binary-amd64/Packages",
 		"dists/noble/universe/binary-amd64/Packages",
 		"dists/noble-updates/main/binary-amd64/Packages",
 	} {
-		if !strings.Contains(command, want) {
-			t.Fatalf("offline install command missing %q in:\n%s", want, command)
+		if !strings.Contains(requiredIndexes, want) {
+			t.Fatalf("offline required-indexes config missing %q in:\n%s", want, requiredIndexes)
 		}
 	}
-	if strings.Contains(command, "dists/noble-updates/universe/binary-amd64/Packages") {
-		t.Fatalf("offline install command checks a source component that was not copied:\n%s", command)
+	if strings.Contains(requiredIndexes, "dists/noble-updates/universe/binary-amd64/Packages") {
+		t.Fatalf("offline install config checks a source component that was not copied:\n%s", requiredIndexes)
 	}
 }
 
@@ -438,6 +471,15 @@ func writeFile(t *testing.T, path, data string) {
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func readTestFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
 }
 
 func writePlainFile(path, data string) {

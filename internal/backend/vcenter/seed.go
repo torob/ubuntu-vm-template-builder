@@ -41,6 +41,10 @@ func installedGuestGRUBCleanupLateCommands() []string {
 	return seediso.InstalledGuestGRUBCleanupLateCommands()
 }
 
+func builderSupportLateCommands() []string {
+	return seediso.BuilderSupportLateCommands()
+}
+
 func AddAutoinstallKernelArgs(data []byte) ([]byte, bool) {
 	return seediso.AddAutoinstallKernelArgs(data)
 }

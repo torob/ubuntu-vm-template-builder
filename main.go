@@ -927,6 +927,7 @@ func collectQEMUPrerequisites() prerequisiteReport {
 			Suggestion:  "Run qemu builds on a Linux host with KVM support.",
 		},
 		commandPrerequisite("qemu-system-x86_64", "QEMU system emulator used by the qemu backend.", true, installCmd),
+		commandPrerequisite("xorriso", "ISO remastering tool used by the qemu backend to inject builder support scripts.", true, xorrisoInstallSuggestion(osInfo)),
 		commandPrerequisite("qemu-img", "QEMU image tool used when creating qcow2 or vmdk images.", false, installCmd),
 		ovmfPrerequisite(osInfo),
 		kvmPrerequisite(osInfo),
@@ -943,7 +944,7 @@ func collectQEMUPrerequisites() prerequisiteReport {
 			"destination image path that does not already exist",
 			"writable destination image directory",
 			"hardware config YAML with disk_size set to a valid size such as 20G",
-			"--install-extra-packages config with apt_url and packages; when used, host tools apt-get, xorriso, and the Ubuntu archive keyring are checked during the build",
+			"--install-extra-packages config with apt_url and packages; when used, host tool apt-get and the Ubuntu archive keyring are checked during the build",
 		},
 	}
 }
@@ -952,7 +953,7 @@ func collectVCenterPrerequisites() prerequisiteReport {
 	osInfo := qemu.DetectOSInfo()
 
 	items := []prerequisiteItem{
-		commandPrerequisite("xorriso", "ISO remastering tool used by the vcenter backend to inject autoinstall seed data.", true, xorrisoInstallSuggestion(osInfo)),
+		commandPrerequisite("xorriso", "ISO remastering tool used by the vcenter backend to inject autoinstall seed data and builder support scripts.", true, xorrisoInstallSuggestion(osInfo)),
 	}
 
 	return prerequisiteReport{
@@ -965,7 +966,7 @@ func collectVCenterPrerequisites() prerequisiteReport {
 			"valid vCenter connection and placement flags",
 			"target ESXi host with access to the selected datastore and network",
 			"hardware config YAML with disk_size set to a valid size such as 20G",
-			"--install-extra-packages config with apt_url and packages; when used, host tools apt-get, xorriso, and the Ubuntu archive keyring are checked during the build",
+			"--install-extra-packages config with apt_url and packages; when used, host tool apt-get and the Ubuntu archive keyring are checked during the build",
 		},
 	}
 }
@@ -974,7 +975,7 @@ func collectProxmoxPrerequisites() prerequisiteReport {
 	osInfo := qemu.DetectOSInfo()
 
 	items := []prerequisiteItem{
-		commandPrerequisite("xorriso", "ISO remastering tool used by the proxmox backend to inject autoinstall seed data.", true, proxmox.XorrisoInstallSuggestion(osInfo)),
+		commandPrerequisite("xorriso", "ISO remastering tool used by the proxmox backend to inject autoinstall seed data and builder support scripts.", true, proxmox.XorrisoInstallSuggestion(osInfo)),
 	}
 
 	return prerequisiteReport{
@@ -990,7 +991,7 @@ func collectProxmoxPrerequisites() prerequisiteReport {
 			"--proxmox-disk-storage that allows images content and has enough free space for the VM disk, EFI vars, and optional Cloud-Init drive",
 			"hardware config YAML with disk_size set to a valid size such as 20G",
 			"optional --options and --cloud-init-options YAML files with supported Proxmox settings only",
-			"--install-extra-packages config with apt_url and packages; when used, host tools apt-get, xorriso, and the Ubuntu archive keyring are checked during the build",
+			"--install-extra-packages config with apt_url and packages; when used, host tool apt-get and the Ubuntu archive keyring are checked during the build",
 		},
 	}
 }
@@ -1058,7 +1059,7 @@ func kvmPrerequisite(osInfo qemu.OSInfo) prerequisiteItem {
 
 func xorrisoInstallSuggestion(osInfo qemu.OSInfo) string {
 	if osInfo.GOOS != "linux" {
-		return "Install xorriso from the host operating system package manager before using the vcenter backend."
+		return "Install xorriso from the host operating system package manager before using build backends that remaster installer ISOs."
 	}
 	return vcenter.XorrisoInstallSuggestion(osInfo)
 }
