@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"ubuntu-vm-template-builder/internal/backend/proxmox"
 	"ubuntu-vm-template-builder/internal/backend/qemu"
 	"ubuntu-vm-template-builder/internal/backend/vcenter"
 	"ubuntu-vm-template-builder/internal/common"
@@ -19,6 +20,7 @@ import (
 const (
 	commandQEMU                  = "qemu"
 	commandVCenter               = "vcenter"
+	commandProxmox               = "proxmox"
 	commandBuild                 = "build"
 	commandUpload                = "upload"
 	commandPrerequisites         = "prerequisites"
@@ -60,9 +62,35 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runQEMU(args[0], args[2:], stdout, stderr)
 	case commandVCenter:
 		return runVCenter(args[0], args[2:], stdout, stderr)
+	case commandProxmox:
+		return runProxmox(args[0], args[2:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "Error: unknown command %q\n", args[1])
 		printUsage(stderr, args[0])
+		return 1
+	}
+}
+
+func runProxmox(program string, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "Error: missing proxmox command")
+		printProxmoxUsage(stderr, program)
+		return 1
+	}
+
+	switch args[0] {
+	case "-h", "--help", "help":
+		printProxmoxUsage(stdout, program)
+		return 0
+	case commandBuild:
+		return runProxmoxBuild(program, args[1:], stdout, stderr)
+	case commandHardwareConfigExample:
+		return runHardwareConfigExampleCommand(program, commandProxmox, args[1:], stdout, stderr, printProxmoxHardwareConfigExample)
+	case commandPrerequisites, "prereqs", "prerequests", "prequests":
+		return runPrerequisitesCommand(program, commandProxmox, args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "Error: unknown proxmox command %q\n", args[0])
+		printProxmoxUsage(stderr, program)
 		return 1
 	}
 }
@@ -415,6 +443,139 @@ func runVCenterUpload(program string, args []string, stdout, stderr io.Writer) i
 	return 0
 }
 
+func runProxmoxBuild(program string, args []string, stdout, stderr io.Writer) int {
+	var (
+		isoPath            string
+		userDataPath       string
+		hardwareConfigPath string
+		proxmoxHost        string
+		proxmoxTokenID     string
+		proxmoxTokenSecret string
+		proxmoxInsecure    bool
+		proxmoxNode        string
+		proxmoxISOStorage  string
+		proxmoxDiskStorage string
+		proxmoxVMID        int
+		proxmoxBridge      string
+		templateName       string
+		extraPackagesPath  string
+	)
+
+	fs := flag.NewFlagSet(commandProxmox+" "+commandBuild, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.StringVar(&isoPath, "iso", "", "Ubuntu ISO file path")
+	fs.StringVar(&userDataPath, "user-data", "", "cloud-init autoinstall user-data file")
+	fs.StringVar(&hardwareConfigPath, "hardware-config", "", "Hardware config YAML file containing disk_size")
+	fs.StringVar(&proxmoxHost, "proxmox-host", "", "Proxmox VE hostname or URL")
+	fs.StringVar(&proxmoxTokenID, "proxmox-token-id", "", "Proxmox API token ID, for example root@pam!builder")
+	fs.StringVar(&proxmoxTokenSecret, "proxmox-token-secret", "", "Proxmox API token secret")
+	fs.BoolVar(&proxmoxInsecure, "proxmox-insecure", false, "Skip Proxmox TLS certificate verification")
+	fs.StringVar(&proxmoxNode, "proxmox-node", "", "Proxmox node name")
+	fs.StringVar(&proxmoxISOStorage, "proxmox-iso-storage", "", "Proxmox storage ID used for the temporary installer ISO; must allow iso content")
+	fs.StringVar(&proxmoxDiskStorage, "proxmox-disk-storage", "", "Proxmox storage ID used for VM disks and EFI vars; must allow images content")
+	fs.IntVar(&proxmoxVMID, "proxmox-vmid", 0, "Proxmox VMID to use (default: allocate the next available ID)")
+	fs.StringVar(&proxmoxBridge, "proxmox-bridge", "", "Proxmox network bridge, for example vmbr0")
+	fs.StringVar(&templateName, "template-name", "", "Proxmox VM/template name (defaults to user-data hostname)")
+	fs.StringVar(&extraPackagesPath, "install-extra-packages", "", "YAML file with apt_url and packages to embed in the installer ISO")
+	fs.Usage = func() {
+		printProxmoxBuildUsage(fs.Output(), program)
+	}
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 1
+	}
+
+	missing := requiredFlagErrors(map[string]string{
+		"iso":                  isoPath,
+		"proxmox-disk-storage": proxmoxDiskStorage,
+		"proxmox-host":         proxmoxHost,
+		"proxmox-iso-storage":  proxmoxISOStorage,
+		"proxmox-node":         proxmoxNode,
+		"proxmox-token-id":     proxmoxTokenID,
+		"proxmox-token-secret": proxmoxTokenSecret,
+		"user-data":            userDataPath,
+	})
+	if len(missing) > 0 {
+		fmt.Fprintf(stderr, "Error: missing required flags: %s\n", strings.Join(missing, ", "))
+		fs.Usage()
+		return 1
+	}
+	if proxmoxVMID < 0 {
+		fmt.Fprintln(stderr, "Error: --proxmox-vmid must be greater than zero when set")
+		return 1
+	}
+
+	hardware, err := common.LoadHardwareConfig(hardwareConfigPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
+	if err := hardware.Validate(); err != nil {
+		fmt.Fprintf(stderr, "Error: invalid hardware config: %v\n", err)
+		return 1
+	}
+	effectiveBridge := effectiveProxmoxBridge(proxmoxBridge, hardware)
+	if strings.TrimSpace(effectiveBridge) == "" {
+		fmt.Fprintln(stderr, "Error: missing required Proxmox bridge: pass --proxmox-bridge or set proxmox.bridge in --hardware-config")
+		fs.Usage()
+		return 1
+	}
+	userData, displayName, err := loadDisplayUserData(userDataPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
+	if strings.TrimSpace(templateName) == "" {
+		templateName = displayName
+	}
+	extraPackages, err := offlineapt.LoadConfig(extraPackagesPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	cfg := proxmox.Config{
+		UbuntuISO:     isoPath,
+		UserDataPath:  userDataPath,
+		UserData:      userData,
+		DiskSize:      hardware.DiskSize,
+		DisplayName:   displayName,
+		Hardware:      hardware,
+		ExtraPackages: extraPackages,
+		Proxmox: proxmox.ConnectionConfig{
+			Host:        proxmoxHost,
+			TokenID:     proxmoxTokenID,
+			TokenSecret: proxmoxTokenSecret,
+			Insecure:    proxmoxInsecure,
+			Node:        proxmoxNode,
+			ISOStorage:  proxmoxISOStorage,
+			DiskStorage: proxmoxDiskStorage,
+			VMID:        proxmoxVMID,
+			Bridge:      effectiveBridge,
+			Name:        templateName,
+		},
+	}
+
+	fmt.Println("Checking prerequisites...")
+	if err := proxmox.CheckPrerequisites(cfg); err != nil {
+		fmt.Fprintf(stderr, "Error: prerequisite check failed: %v\n", err)
+		return 1
+	}
+	fmt.Println("OK prerequisites satisfied")
+
+	installer, err := proxmox.NewInstaller(cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "Failed to create Proxmox installer: %v\n", err)
+		return 1
+	}
+	if installer.Install() {
+		return 0
+	}
+	return 1
+}
+
 func runHardwareConfigExampleCommand(program, backend string, args []string, stdout, stderr io.Writer, printExample func(io.Writer)) int {
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		printHardwareConfigExampleUsage(stdout, program, backend)
@@ -435,6 +596,13 @@ func effectiveVCenterNetwork(cliNetwork string, hardware common.HardwareConfig) 
 		return network
 	}
 	return strings.TrimSpace(hardware.VCenter.Network)
+}
+
+func effectiveProxmoxBridge(cliBridge string, hardware common.HardwareConfig) string {
+	if bridge := strings.TrimSpace(cliBridge); bridge != "" {
+		return bridge
+	}
+	return strings.TrimSpace(hardware.Proxmox.Bridge)
 }
 
 func loadDisplayUserData(userDataPath string) ([]byte, string, error) {
@@ -467,6 +635,8 @@ func printUsage(out io.Writer, program string) {
 	fmt.Fprintln(out, "        Build a local QEMU/KVM disk image")
 	fmt.Fprintln(out, "  vcenter")
 	fmt.Fprintln(out, "        Build a vCenter VM or template on a selected ESXi host")
+	fmt.Fprintln(out, "  proxmox")
+	fmt.Fprintln(out, "        Build a Proxmox VE VM or template on a selected node")
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "Run %s <command> --help for command-specific flags.\n", program)
 }
@@ -576,6 +746,53 @@ func printVCenterUploadUsage(out io.Writer, program string) {
 	fmt.Fprintln(out, "        Datastore name or inventory path")
 }
 
+func printProxmoxUsage(out io.Writer, program string) {
+	fmt.Fprintf(out, "Usage: %s proxmox <command> [options]\n\n", program)
+	fmt.Fprintln(out, "Commands:")
+	fmt.Fprintf(out, "  %s\n", commandBuild)
+	fmt.Fprintln(out, "        Build a Proxmox VE VM or template on a selected node")
+	fmt.Fprintf(out, "  %s\n", commandHardwareConfigExample)
+	fmt.Fprintln(out, "        Print an example Proxmox hardware config YAML file")
+	fmt.Fprintf(out, "  %s\n", commandPrerequisites)
+	fmt.Fprintln(out, "        Print Proxmox backend host prerequisites and installation suggestions")
+	fmt.Fprintln(out, "        Aliases: prereqs, prerequests, prequests")
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Run %s proxmox <command> --help for command-specific flags.\n", program)
+}
+
+func printProxmoxBuildUsage(out io.Writer, program string) {
+	fmt.Fprintf(out, "Usage: %s proxmox %s --iso ubuntu.iso --user-data autoinstall.yaml --proxmox-host pve.example.com --proxmox-token-id 'root@pam!builder' --proxmox-token-secret secret --proxmox-node pve1 --proxmox-iso-storage local --proxmox-disk-storage vms --proxmox-bridge vmbr0 [--template-name ubuntu-template] --hardware-config hardware.yaml\n\n", program, commandBuild)
+	fmt.Fprintln(out, "Options:")
+	fmt.Fprintln(out, "  --iso string")
+	fmt.Fprintln(out, "        Ubuntu ISO file path")
+	fmt.Fprintln(out, "  --user-data string")
+	fmt.Fprintln(out, "        cloud-init autoinstall user-data file")
+	fmt.Fprintln(out, "  --hardware-config string")
+	fmt.Fprintln(out, "        Hardware config YAML file containing disk_size and hardware settings")
+	fmt.Fprintln(out, "  --proxmox-host string")
+	fmt.Fprintln(out, "        Proxmox VE hostname or URL")
+	fmt.Fprintln(out, "  --proxmox-token-id string")
+	fmt.Fprintln(out, "        Proxmox API token ID, for example root@pam!builder")
+	fmt.Fprintln(out, "  --proxmox-token-secret string")
+	fmt.Fprintln(out, "        Proxmox API token secret")
+	fmt.Fprintln(out, "  --proxmox-insecure")
+	fmt.Fprintln(out, "        Skip Proxmox TLS certificate verification")
+	fmt.Fprintln(out, "  --proxmox-node string")
+	fmt.Fprintln(out, "        Proxmox node name")
+	fmt.Fprintln(out, "  --proxmox-iso-storage string")
+	fmt.Fprintln(out, "        Proxmox storage ID used for the temporary installer ISO; must allow iso content")
+	fmt.Fprintln(out, "  --proxmox-disk-storage string")
+	fmt.Fprintln(out, "        Proxmox storage ID used for VM disks and EFI vars; must allow images content")
+	fmt.Fprintln(out, "  --proxmox-vmid int")
+	fmt.Fprintln(out, "        Proxmox VMID to use (default: allocate the next available ID)")
+	fmt.Fprintln(out, "  --proxmox-bridge string")
+	fmt.Fprintln(out, "        Proxmox network bridge, for example vmbr0")
+	fmt.Fprintln(out, "  --template-name string")
+	fmt.Fprintln(out, "        Proxmox VM/template name (defaults to user-data hostname)")
+	fmt.Fprintln(out, "  --install-extra-packages string")
+	fmt.Fprintln(out, "        YAML file with apt_url and packages to embed in the installer ISO")
+}
+
 func printHardwareConfigExampleUsage(out io.Writer, program, backend string) {
 	fmt.Fprintf(out, "Usage: %s %s %s\n\n", program, backend, commandHardwareConfigExample)
 	fmt.Fprintln(out, "Print a complete example hardware config YAML file for this backend.")
@@ -628,6 +845,42 @@ func printVCenterHardwareConfigExample(out io.Writer) {
 	fmt.Fprintln(out, "  guest_os_id: ubuntu64Guest")
 	fmt.Fprintln(out, "  # reserve_all_guest_memory reserves memory_mb for this VM in vCenter")
 	fmt.Fprintln(out, "  reserve_all_guest_memory: false")
+	fmt.Fprintln(out, "  # output_type: template or vm")
+	fmt.Fprintln(out, "  output_type: template")
+}
+
+func printProxmoxHardwareConfigExample(out io.Writer) {
+	fmt.Fprintln(out, "# Proxmox hardware config example")
+	fmt.Fprintln(out, "# boot_firmware: uefi or bios")
+	fmt.Fprintln(out, "boot_firmware: uefi")
+	fmt.Fprintln(out, "# disk_size is required and supports suffixes such as M, G, or T")
+	fmt.Fprintln(out, "disk_size: 20G")
+	fmt.Fprintln(out, "# vcpu must be greater than zero")
+	fmt.Fprintln(out, "vcpu: 2")
+	fmt.Fprintln(out, "# memory_mb must be greater than zero")
+	fmt.Fprintln(out, "memory_mb: 2048")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "proxmox:")
+	fmt.Fprintln(out, "  # bridge is the Proxmox bridge name. --proxmox-bridge overrides this value.")
+	fmt.Fprintln(out, "  bridge: vmbr0")
+	fmt.Fprintln(out, "  # network_adapter: virtio, e1000, e1000e, rtl8139, or vmxnet3")
+	fmt.Fprintln(out, "  network_adapter: virtio")
+	fmt.Fprintln(out, "  # scsi_controller: virtio-scsi-pci, virtio-scsi-single, lsi, lsi53c810, megasas, or pvscsi")
+	fmt.Fprintln(out, "  scsi_controller: virtio-scsi-pci")
+	fmt.Fprintln(out, "  # disk_interface: scsi, sata, virtio, or ide")
+	fmt.Fprintln(out, "  disk_interface: scsi")
+	fmt.Fprintln(out, "  # disk_format: raw, qcow2, or vmdk")
+	fmt.Fprintln(out, "  disk_format: raw")
+	fmt.Fprintln(out, "  # cpu_type is passed to Proxmox as the VM CPU type")
+	fmt.Fprintln(out, "  cpu_type: host")
+	fmt.Fprintln(out, "  # machine is the Proxmox machine type")
+	fmt.Fprintln(out, "  machine: q35")
+	fmt.Fprintln(out, "  # ostype is the Proxmox guest OS type")
+	fmt.Fprintln(out, "  ostype: l26")
+	fmt.Fprintln(out, "  # efi_type applies when boot_firmware is uefi: 2m or 4m")
+	fmt.Fprintln(out, "  efi_type: 4m")
+	fmt.Fprintln(out, "  # pre_enrolled_keys controls secure boot keys for the Proxmox EFI disk")
+	fmt.Fprintln(out, "  pre_enrolled_keys: false")
 	fmt.Fprintln(out, "  # output_type: template or vm")
 	fmt.Fprintln(out, "  output_type: template")
 }
@@ -691,6 +944,30 @@ func collectVCenterPrerequisites() prerequisiteReport {
 			"cloud-init autoinstall user-data YAML with a top-level autoinstall mapping",
 			"valid vCenter connection and placement flags",
 			"target ESXi host with access to the selected datastore and network",
+			"hardware config YAML with disk_size set to a valid size such as 20G",
+			"--install-extra-packages config with apt_url and packages; when used, host tools apt-get, xorriso, and the Ubuntu archive keyring are checked during the build",
+		},
+	}
+}
+
+func collectProxmoxPrerequisites() prerequisiteReport {
+	osInfo := qemu.DetectOSInfo()
+
+	items := []prerequisiteItem{
+		commandPrerequisite("xorriso", "ISO remastering tool used by the proxmox backend to inject autoinstall seed data.", true, proxmox.XorrisoInstallSuggestion(osInfo)),
+	}
+
+	return prerequisiteReport{
+		Backend: "Proxmox",
+		OS:      osInfo,
+		Items:   items,
+		InputPrerequisites: []string{
+			"Ubuntu live-server ISO containing /casper/vmlinuz and /casper/initrd",
+			"cloud-init autoinstall user-data YAML with a top-level autoinstall mapping",
+			"valid Proxmox VE API-token connection flags",
+			"target Proxmox node with access to the selected storages and bridge",
+			"--proxmox-iso-storage that allows iso content and has enough free space for the remastered installer ISO",
+			"--proxmox-disk-storage that allows images content and has enough free space for the VM disk and EFI vars",
 			"hardware config YAML with disk_size set to a valid size such as 20G",
 			"--install-extra-packages config with apt_url and packages; when used, host tools apt-get, xorriso, and the Ubuntu archive keyring are checked during the build",
 		},
@@ -791,6 +1068,8 @@ func runPrerequisitesCommand(program, backend string, args []string, stdout, std
 		report = collectQEMUPrerequisites()
 	case commandVCenter:
 		report = collectVCenterPrerequisites()
+	case commandProxmox:
+		report = collectProxmoxPrerequisites()
 	default:
 		fmt.Fprintf(stderr, "Error: unknown backend %q\n", backend)
 		return 1

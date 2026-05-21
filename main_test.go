@@ -23,7 +23,7 @@ func TestRunRequiresBackendSubcommand(t *testing.T) {
 }
 
 func TestSubcommandHelpExitsSuccessfully(t *testing.T) {
-	for _, command := range []string{"qemu", "vcenter"} {
+	for _, command := range []string{"qemu", "vcenter", "proxmox"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"ubuntu-vm-template-builder", command, "--help"}, &stdout, &stderr)
@@ -43,7 +43,7 @@ func TestSubcommandHelpExitsSuccessfully(t *testing.T) {
 	}
 }
 
-func TestVCenterHelpMentionsUploadCommand(t *testing.T) {
+func TestOnlyVCenterHelpMentionsUploadCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"ubuntu-vm-template-builder", "vcenter", "--help"}, &stdout, &stderr)
 	if code != 0 {
@@ -52,10 +52,20 @@ func TestVCenterHelpMentionsUploadCommand(t *testing.T) {
 	if !strings.Contains(stdout.String(), commandUpload) {
 		t.Fatalf("vcenter help missing upload command:\n%s", stdout.String())
 	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"ubuntu-vm-template-builder", "proxmox", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("proxmox --help exit code = %d, stderr:\n%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), commandUpload) {
+		t.Fatalf("proxmox help should not include upload command:\n%s", stdout.String())
+	}
 }
 
 func TestBuildCommandHelpExitsSuccessfully(t *testing.T) {
-	for _, command := range []string{"qemu", "vcenter"} {
+	for _, command := range []string{"qemu", "vcenter", "proxmox"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"ubuntu-vm-template-builder", command, commandBuild, "--help"}, &stdout, &stderr)
@@ -128,6 +138,28 @@ func TestHardwareConfigExampleCommands(t *testing.T) {
 			},
 			absent: []string{"qemu:"},
 		},
+		{
+			command: "proxmox",
+			want: []string{
+				"boot_firmware: uefi",
+				"disk_size: 20G",
+				"vcpu: 2",
+				"memory_mb: 2048",
+				"proxmox:",
+				"bridge: vmbr0",
+				"network_adapter: virtio",
+				"scsi_controller: virtio-scsi-pci",
+				"disk_interface: scsi",
+				"disk_format: raw",
+				"cpu_type: host",
+				"machine: q35",
+				"ostype: l26",
+				"efi_type: 4m",
+				"pre_enrolled_keys: false",
+				"output_type: template",
+			},
+			absent: []string{"qemu:", "vcenter:"},
+		},
 	}
 
 	for _, test := range tests {
@@ -162,7 +194,7 @@ func TestHardwareConfigExampleCommands(t *testing.T) {
 }
 
 func TestHardwareConfigExampleHelpExitsSuccessfully(t *testing.T) {
-	for _, command := range []string{"qemu", "vcenter"} {
+	for _, command := range []string{"qemu", "vcenter", "proxmox"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"ubuntu-vm-template-builder", command, commandHardwareConfigExample, "--help"}, &stdout, &stderr)
@@ -177,7 +209,7 @@ func TestHardwareConfigExampleHelpExitsSuccessfully(t *testing.T) {
 }
 
 func TestPrerequisiteCommandsAreNestedUnderBackends(t *testing.T) {
-	for _, command := range []string{"qemu", "vcenter"} {
+	for _, command := range []string{"qemu", "vcenter", "proxmox"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"ubuntu-vm-template-builder", command, commandPrerequisites, "--help"}, &stdout, &stderr)
@@ -223,6 +255,16 @@ func TestPrerequisiteCollectorsAreBackendSpecific(t *testing.T) {
 			t.Fatalf("vCenter prerequisites unexpectedly include %s: %+v", disallowed, vcenterReport.Items)
 		}
 	}
+
+	proxmoxReport := collectProxmoxPrerequisites()
+	if !prerequisiteNamesContain(proxmoxReport, "xorriso") {
+		t.Fatalf("Proxmox prerequisites missing xorriso: %+v", proxmoxReport.Items)
+	}
+	for _, input := range proxmoxReport.InputPrerequisites {
+		if strings.Contains(strings.ToLower(input), "vcenter") {
+			t.Fatalf("Proxmox input prerequisite mentions vCenter: %q", input)
+		}
+	}
 }
 
 func prerequisiteNamesContain(report prerequisiteReport, name string) bool {
@@ -235,7 +277,7 @@ func prerequisiteNamesContain(report prerequisiteReport, name string) bool {
 }
 
 func TestHardwareConfigExampleRejectsExtraArgs(t *testing.T) {
-	for _, command := range []string{"qemu", "vcenter"} {
+	for _, command := range []string{"qemu", "vcenter", "proxmox"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"ubuntu-vm-template-builder", command, commandHardwareConfigExample, "extra"}, &stdout, &stderr)
@@ -265,6 +307,43 @@ func TestRunVCenterUploadRequiresUploadAndPlacementFlags(t *testing.T) {
 		if strings.Contains(strings.SplitN(errOutput, "\n", 2)[0], absent) {
 			t.Fatalf("vcenter upload missing flag error should not mention build-only flag %s:\n%s", absent, errOutput)
 		}
+	}
+}
+
+func TestRunProxmoxUploadIsUnknownCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ubuntu-vm-template-builder", "proxmox", commandUpload}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("proxmox upload returned success")
+	}
+	errOutput := stderr.String()
+	if !strings.Contains(errOutput, `unknown proxmox command "upload"`) {
+		t.Fatalf("proxmox upload error is unexpected:\n%s", errOutput)
+	}
+	if strings.Contains(errOutput, "--source") || strings.Contains(errOutput, "--destination") || strings.Contains(errOutput, "--proxmox-storage") {
+		t.Fatalf("proxmox upload should not expose removed upload flags:\n%s", errOutput)
+	}
+}
+
+func TestRunProxmoxBuildRejectsOldStorageFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ubuntu-vm-template-builder",
+		"proxmox",
+		commandBuild,
+		"--iso", "ubuntu.iso",
+		"--user-data", "autoinstall.yaml",
+		"--proxmox-host", "pve.example.com",
+		"--proxmox-token-id", "root@pam!builder",
+		"--proxmox-token-secret", "secret",
+		"--proxmox-node", "pve",
+		"--proxmox-storage", "local",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("proxmox build accepted removed --proxmox-storage flag")
+	}
+	if !strings.Contains(stderr.String(), "flag provided but not defined: -proxmox-storage") {
+		t.Fatalf("old storage flag error is unexpected:\n%s", stderr.String())
 	}
 }
 
@@ -334,7 +413,7 @@ func TestRunQEMURequiresDiskSizeFromHardwareConfig(t *testing.T) {
 }
 
 func TestRunQEMURejectsDiskSizeFlag(t *testing.T) {
-	for _, command := range []string{"qemu", "vcenter"} {
+	for _, command := range []string{"qemu", "vcenter", "proxmox"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run([]string{
@@ -360,6 +439,7 @@ func TestBackendDirectBuildSyntaxIsRejected(t *testing.T) {
 	}{
 		{command: "qemu", flag: "--iso"},
 		{command: "vcenter", flag: "--iso"},
+		{command: "proxmox", flag: "--iso"},
 	}
 	for _, test := range tests {
 		t.Run(test.command, func(t *testing.T) {
@@ -399,6 +479,33 @@ func TestRunVCenterDoesNotRequireImage(t *testing.T) {
 	}
 	if strings.Contains(errOutput, "--image") {
 		t.Fatalf("vcenter missing flag error should not require --image:\n%s", errOutput)
+	}
+}
+
+func TestRunProxmoxDoesNotRequireImage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ubuntu-vm-template-builder",
+		"proxmox",
+		"build",
+		"--iso", "ubuntu.iso",
+		"--user-data", "autoinstall.yaml",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("proxmox command returned success without placement flags")
+	}
+	errOutput := stderr.String()
+	for _, want := range []string{"--proxmox-disk-storage", "--proxmox-host", "--proxmox-iso-storage", "--proxmox-node", "--proxmox-token-id", "--proxmox-token-secret"} {
+		if !strings.Contains(errOutput, want) {
+			t.Fatalf("proxmox missing flag error does not mention %s:\n%s", want, errOutput)
+		}
+	}
+	firstLine := strings.SplitN(errOutput, "\n", 2)[0]
+	if strings.Contains(firstLine, "--proxmox-bridge") {
+		t.Fatalf("proxmox missing flag error should allow bridge from hardware config:\n%s", errOutput)
+	}
+	if strings.Contains(errOutput, "--image") {
+		t.Fatalf("proxmox missing flag error should not require --image:\n%s", errOutput)
 	}
 }
 
@@ -459,6 +566,74 @@ func TestRunVCenterAcceptsNetworkFromHardwareConfig(t *testing.T) {
 	}
 }
 
+func TestRunProxmoxRequiresBridgeFromFlagOrHardwareConfig(t *testing.T) {
+	hardwareConfigPath := writeTempHardwareConfig(t, "disk_size: 20G\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ubuntu-vm-template-builder",
+		"proxmox",
+		"build",
+		"--iso", "ubuntu.iso",
+		"--user-data", "autoinstall.yaml",
+		"--hardware-config", hardwareConfigPath,
+		"--proxmox-host", "pve.example.com",
+		"--proxmox-token-id", "root@pam!builder",
+		"--proxmox-token-secret", "secret",
+		"--proxmox-node", "pve",
+		"--proxmox-iso-storage", "local",
+		"--proxmox-disk-storage", "vms",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("proxmox command returned success without bridge")
+	}
+	if !strings.Contains(stderr.String(), "pass --proxmox-bridge or set proxmox.bridge") {
+		t.Fatalf("bridge error is unexpected:\n%s", stderr.String())
+	}
+}
+
+func TestRunProxmoxAcceptsBridgeFromHardwareConfig(t *testing.T) {
+	hardwareConfigPath := writeTempHardwareConfig(t, "disk_size: 20G\nproxmox:\n  bridge: vmbr0\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"ubuntu-vm-template-builder",
+		"proxmox",
+		"build",
+		"--iso", "ubuntu.iso",
+		"--user-data", "autoinstall.yaml",
+		"--hardware-config", hardwareConfigPath,
+		"--proxmox-host", "pve.example.com",
+		"--proxmox-token-id", "root@pam!builder",
+		"--proxmox-token-secret", "secret",
+		"--proxmox-node", "pve",
+		"--proxmox-iso-storage", "local",
+		"--proxmox-disk-storage", "vms",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("proxmox command unexpectedly reached success with placeholder files")
+	}
+	if strings.Contains(stderr.String(), "pass --proxmox-bridge or set proxmox.bridge") {
+		t.Fatalf("proxmox did not accept hardware config bridge:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "read user-data file") {
+		t.Fatalf("proxmox should proceed past bridge validation to user-data loading:\n%s", stderr.String())
+	}
+}
+
+func TestEffectiveProxmoxBridgePrefersCLI(t *testing.T) {
+	hardware := common.DefaultHardwareConfig()
+	hardware.DiskSize = "20G"
+	hardware.Proxmox.Bridge = "yaml-bridge"
+
+	if got := effectiveProxmoxBridge(" cli-bridge ", hardware); got != "cli-bridge" {
+		t.Fatalf("effectiveProxmoxBridge with CLI = %q, want cli-bridge", got)
+	}
+	if got := effectiveProxmoxBridge("", hardware); got != "yaml-bridge" {
+		t.Fatalf("effectiveProxmoxBridge without CLI = %q, want yaml-bridge", got)
+	}
+}
+
 func TestEffectiveVCenterNetworkPrefersCLI(t *testing.T) {
 	hardware := common.DefaultHardwareConfig()
 	hardware.DiskSize = "20G"
@@ -483,6 +658,7 @@ autoinstall:
 	}
 	qemuHardwarePath := writeTempHardwareConfig(t, "disk_size: 20G\nboot_firmware: bios\n")
 	vcenterHardwarePath := writeTempHardwareConfig(t, "disk_size: 20G\nvcenter:\n  network: VM Network\n")
+	proxmoxHardwarePath := writeTempHardwareConfig(t, "disk_size: 20G\nproxmox:\n  bridge: vmbr0\n")
 	extraPath := filepath.Join(dir, "extra-packages.yaml")
 	if err := os.WriteFile(extraPath, []byte("apt_url: http://archive.ubuntu.com/ubuntu\n"), 0o644); err != nil {
 		t.Fatalf("write extra packages config: %v", err)
@@ -521,6 +697,24 @@ autoinstall:
 				"--vcenter-esxi-host", "esxi.example.com",
 				"--vcenter-datastore", "datastore1",
 				"--vcenter-folder", "vm",
+				"--install-extra-packages", extraPath,
+			},
+		},
+		{
+			name: "proxmox",
+			args: []string{
+				"ubuntu-vm-template-builder",
+				"proxmox",
+				"build",
+				"--iso", "missing.iso",
+				"--user-data", userDataPath,
+				"--hardware-config", proxmoxHardwarePath,
+				"--proxmox-host", "pve.example.com",
+				"--proxmox-token-id", "root@pam!builder",
+				"--proxmox-token-secret", "secret",
+				"--proxmox-node", "pve",
+				"--proxmox-iso-storage", "local",
+				"--proxmox-disk-storage", "vms",
 				"--install-extra-packages", extraPath,
 			},
 		},
@@ -621,6 +815,7 @@ func TestPrintUsageMentionsBackendCommands(t *testing.T) {
 		"Usage: ubuntu-vm-template-builder <command>",
 		"qemu",
 		"vcenter",
+		"proxmox",
 		"Run ubuntu-vm-template-builder <command> --help",
 	} {
 		if !strings.Contains(output, want) {
@@ -658,6 +853,18 @@ func TestCommandUsageMentionsHardwareConfig(t *testing.T) {
 	printVCenterBuildUsage(&out, "ubuntu-vm-template-builder")
 	if output := out.String(); !strings.Contains(output, "--hardware-config") || !strings.Contains(output, "--install-extra-packages") || !strings.Contains(output, "vcenter build") || strings.Contains(output, "--disk-size") || strings.Contains(output, "--vm-cpu") || strings.Contains(output, "--vm-memory-mb") {
 		t.Fatalf("vcenter build usage should mention --hardware-config and not removed hardware flags:\n%s", output)
+	}
+
+	out.Reset()
+	printProxmoxUsage(&out, "ubuntu-vm-template-builder")
+	if output := out.String(); !strings.Contains(output, commandBuild) || strings.Contains(output, commandUpload) || strings.Contains(output, "--hardware-config") || strings.Contains(output, "--proxmox-host") {
+		t.Fatalf("proxmox backend usage should mention commands and not build flags:\n%s", output)
+	}
+
+	out.Reset()
+	printProxmoxBuildUsage(&out, "ubuntu-vm-template-builder")
+	if output := out.String(); !strings.Contains(output, "--hardware-config") || !strings.Contains(output, "--install-extra-packages") || !strings.Contains(output, "proxmox build") || !strings.Contains(output, "--proxmox-host") || !strings.Contains(output, "--proxmox-iso-storage") || !strings.Contains(output, "--proxmox-disk-storage") || strings.Contains(output, "--proxmox-storage") || strings.Contains(output, "--disk-size") || strings.Contains(output, "--vm-cpu") || strings.Contains(output, "--vm-memory-mb") {
+		t.Fatalf("proxmox build usage should mention --hardware-config and not removed hardware flags:\n%s", output)
 	}
 }
 

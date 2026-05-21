@@ -1,15 +1,15 @@
 # Ubuntu VM Template Builder
 
-Builds reproducible Ubuntu VM template disk images in QEMU, or vCenter VMs and
-templates directly on ESXi hardware, using a cloud-init autoinstall file that you
-provide directly.
+Builds reproducible Ubuntu VM template disk images in QEMU, vCenter VMs and
+templates directly on ESXi hardware, or Proxmox VE VMs and templates on a
+selected node, using a cloud-init autoinstall file that you provide directly.
 
 The `qemu` command creates a NoCloud seed ISO containing your `user-data`,
 creates the destination disk image, extracts the Ubuntu ISO kernel and initrd,
-and boots QEMU with `autoinstall ---`. The `vcenter` command
-remasters the Ubuntu ISO with NoCloud seed data, boots a temporary VM on the
-selected ESXi host, waits for the installer to power off, and leaves the guest
-as a VM or converts it to a vCenter template.
+and boots QEMU with `autoinstall ---`. The `vcenter` and `proxmox` commands
+remaster the Ubuntu ISO with NoCloud seed data, boot a temporary VM on the
+selected virtualization host, wait for the installer to power off, and leave
+the guest as a VM or convert it to a platform template.
 
 It is intended to make Ubuntu VM template creation faster and repeatable: keep
 the autoinstall cloud-config in version control, run the builder, and import the
@@ -22,7 +22,7 @@ resulting image into your virtualization platform as a template.
 - `qemu-img` when creating `qcow2` or `vmdk` images
 - OVMF UEFI firmware for the default `boot_firmware: uefi` hardware config
 - Accessible `/dev/kvm`, because QEMU is launched with `--enable-kvm`
-- `xorriso` when using the `vcenter` command
+- `xorriso` when using the `vcenter` or `proxmox` command
 - `apt-get`, `xorriso`, and the Ubuntu archive keyring when using
   `--install-extra-packages`
 - An Ubuntu live-server ISO containing `/casper/vmlinuz` and `/casper/initrd`
@@ -34,6 +34,7 @@ Check host prerequisites:
 ```bash
 ./ubuntu-vm-template-builder qemu prerequisites
 ./ubuntu-vm-template-builder vcenter prerequisites
+./ubuntu-vm-template-builder proxmox prerequisites
 ```
 
 Aliases under each backend are `prereqs`, `prerequests`, and `prequests`. Each
@@ -118,9 +119,40 @@ Upload an arbitrary file to a vCenter datastore:
 `vcenter upload` creates parent datastore directories automatically and fails if
 the destination already exists unless `--overwrite` is passed.
 
-Available backend commands are currently `qemu` and `vcenter`. Each backend
-provides `build`, `prerequisites`, and `hardware-config-example`; `vcenter` also
-provides `upload`. A `proxmox` command is intentionally not implemented yet.
+Build a Proxmox VE VM or template:
+
+```bash
+./ubuntu-vm-template-builder proxmox \
+  build \
+  --iso /path/to/ubuntu-24.04.3-live-server-amd64.iso \
+  --user-data autoinstall.uefi.example.yaml \
+  --hardware-config hardware.proxmox.yaml \
+  --proxmox-host pve.example.com:8006 \
+  --proxmox-token-id 'root@pam!builder' \
+  --proxmox-token-secret 'secret' \
+  --proxmox-insecure \
+  --proxmox-node pve1 \
+  --proxmox-iso-storage local \
+  --proxmox-disk-storage vms \
+  --proxmox-bridge vmbr0 \
+  --template-name ubuntu-24.04-template \
+  --install-extra-packages extra-packages.yaml
+```
+
+For `proxmox`, `--image` is not used. The output is a remote Proxmox VE VM or
+template, named by `--template-name`, or by the hostname in `--user-data` when
+`--template-name` is omitted. API-token authentication is the only supported
+authentication mode. `--proxmox-iso-storage` must allow `iso` content and is
+used for the temporary remastered installer ISO. `--proxmox-disk-storage` must
+allow `images` content and is used for the VM disk and EFI vars. Before creating
+or uploading remote resources, the build checks the selected storage content
+types and available capacity for the remastered ISO, disk, and EFI vars. During
+installation it streams the guest serial console through Proxmox's websocket
+console API on a best-effort basis.
+
+Available backend commands are currently `qemu`, `vcenter`, and `proxmox`. Each
+backend provides `build`, `prerequisites`, and `hardware-config-example`;
+`vcenter` also provides `upload`.
 
 ## Hardware Config
 
@@ -146,6 +178,18 @@ vcenter:
   guest_os_id: ubuntu64Guest
   reserve_all_guest_memory: false
   output_type: template
+proxmox:
+  bridge: vmbr0
+  network_adapter: virtio
+  scsi_controller: virtio-scsi-pci
+  disk_interface: scsi
+  disk_format: raw
+  cpu_type: host
+  machine: q35
+  ostype: l26
+  efi_type: 4m
+  pre_enrolled_keys: false
+  output_type: template
 ```
 
 Print a complete backend-specific example:
@@ -153,6 +197,7 @@ Print a complete backend-specific example:
 ```bash
 ./ubuntu-vm-template-builder qemu hardware-config-example > hardware.qemu.yaml
 ./ubuntu-vm-template-builder vcenter hardware-config-example > hardware.vcenter.yaml
+./ubuntu-vm-template-builder proxmox hardware-config-example > hardware.proxmox.yaml
 ```
 
 Common hardware config options:
@@ -237,10 +282,31 @@ config or with `--vcenter-network`; the CLI flag overrides the config value.
 Set `vcenter.output_type: vm` to leave the installed guest as a powered-off VM
 instead of converting it to a template. The default is `template`.
 
+Proxmox hardware config options:
+
+| Option | Required | Default | Description |
+| --- | --- | --- | --- |
+| `proxmox.bridge` | Yes, unless `--proxmox-bridge` is set | none | Proxmox bridge name, such as `vmbr0`. The CLI flag overrides this value. |
+| `proxmox.network_adapter` | No | `virtio` | NIC model. Supported values are `virtio`, `e1000`, `e1000e`, `rtl8139`, and `vmxnet3`. |
+| `proxmox.scsi_controller` | No | `virtio-scsi-pci` | SCSI controller. Supported values are `virtio-scsi-pci`, `virtio-scsi-single`, `lsi`, `lsi53c810`, `megasas`, and `pvscsi`. |
+| `proxmox.disk_interface` | No | `scsi` | Guest disk bus. Supported values are `scsi`, `sata`, `virtio`, and `ide`. |
+| `proxmox.disk_format` | No | `raw` | Disk format requested from Proxmox. Supported values are `raw`, `qcow2`, and `vmdk`; storage capabilities still apply. |
+| `proxmox.cpu_type` | No | `host` | CPU type passed to Proxmox, such as `host` or `x86-64-v3`. |
+| `proxmox.machine` | No | `q35` | Proxmox machine type. |
+| `proxmox.ostype` | No | `l26` | Proxmox guest OS type. |
+| `proxmox.efi_type` | No | `4m` | EFI vars disk type when `boot_firmware: uefi`; supported values are `2m` and `4m`. |
+| `proxmox.pre_enrolled_keys` | No | `false` | Whether the EFI vars disk is created with pre-enrolled secure boot keys. |
+| `proxmox.output_type` | No | `template` | Final output type. Supported values are `template` and `vm`. |
+
+For Proxmox, `--proxmox-vmid` is optional. When it is omitted, the builder asks
+Proxmox for the next available VMID. Set `proxmox.output_type: vm` to leave the
+installed guest as a powered-off VM instead of converting it to a template. The
+default is `template`.
+
 ## Extra Offline Packages
 
-`--install-extra-packages` is optional for both `qemu build` and
-`vcenter build`. When set, the builder asks APT for the exact requested package
+`--install-extra-packages` is optional for `qemu build`, `vcenter build`, and
+`proxmox build`. When set, the builder asks APT for the exact requested package
 closure, downloads those `.deb` files on the host with Ubuntu signature and hash
 verification enabled, embeds only those `.deb` files plus Ubuntu's signed
 `dists/...` metadata in the remastered installer ISO, and adds late-commands
@@ -329,11 +395,15 @@ You can also check the container runtime prerequisites:
 
 ```bash
 docker run --rm --device /dev/kvm ubuntu-vm-template-builder qemu prerequisites
+docker run --rm ubuntu-vm-template-builder proxmox prerequisites
 ```
 
 Supported QEMU disk formats are `raw`, `qcow2`, and `vmdk`.
 UEFI installs use a temporary OVMF variables file during QEMU installation; the
 disk image is the only persistent output file.
+The `vcenter` and `proxmox` commands do not need `/dev/kvm` in the container,
+but the container must be able to reach the target API endpoint and mounted
+paths must contain the ISO, user-data, and optional config files.
 
 ## Releases
 

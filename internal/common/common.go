@@ -31,6 +31,18 @@ const (
 
 	VCenterOutputTypeTemplate = "template"
 	VCenterOutputTypeVM       = "vm"
+
+	DefaultProxmoxNetworkAdapter = "virtio"
+	DefaultProxmoxSCSIController = "virtio-scsi-pci"
+	DefaultProxmoxDiskInterface  = "scsi"
+	DefaultProxmoxDiskFormat     = "raw"
+	DefaultProxmoxCPUType        = "host"
+	DefaultProxmoxMachine        = "q35"
+	DefaultProxmoxOSType         = "l26"
+	DefaultProxmoxEFIType        = "4m"
+
+	ProxmoxOutputTypeTemplate = "template"
+	ProxmoxOutputTypeVM       = "vm"
 )
 
 type HardwareConfig struct {
@@ -40,6 +52,7 @@ type HardwareConfig struct {
 	MemoryMB     int                   `yaml:"memory_mb"`
 	QEMU         QEMUHardwareConfig    `yaml:"qemu"`
 	VCenter      VCenterHardwareConfig `yaml:"vcenter"`
+	Proxmox      ProxmoxHardwareConfig `yaml:"proxmox"`
 }
 
 type QEMUHardwareConfig struct {
@@ -59,6 +72,20 @@ type VCenterHardwareConfig struct {
 	OutputType            string `yaml:"output_type"`
 }
 
+type ProxmoxHardwareConfig struct {
+	Bridge          string `yaml:"bridge"`
+	NetworkAdapter  string `yaml:"network_adapter"`
+	SCSIController  string `yaml:"scsi_controller"`
+	DiskInterface   string `yaml:"disk_interface"`
+	DiskFormat      string `yaml:"disk_format"`
+	CPUType         string `yaml:"cpu_type"`
+	Machine         string `yaml:"machine"`
+	OSType          string `yaml:"ostype"`
+	EFIType         string `yaml:"efi_type"`
+	PreEnrolledKeys bool   `yaml:"pre_enrolled_keys"`
+	OutputType      string `yaml:"output_type"`
+}
+
 func DefaultHardwareConfig() HardwareConfig {
 	return HardwareConfig{
 		BootFirmware: DefaultBootFirmware,
@@ -75,6 +102,17 @@ func DefaultHardwareConfig() HardwareConfig {
 			DiskProvisioning: VCenterDiskProvisioningThickLazyZeroed,
 			GuestOSID:        DefaultVCenterGuestOSID,
 			OutputType:       VCenterOutputTypeTemplate,
+		},
+		Proxmox: ProxmoxHardwareConfig{
+			NetworkAdapter: DefaultProxmoxNetworkAdapter,
+			SCSIController: DefaultProxmoxSCSIController,
+			DiskInterface:  DefaultProxmoxDiskInterface,
+			DiskFormat:     DefaultProxmoxDiskFormat,
+			CPUType:        DefaultProxmoxCPUType,
+			Machine:        DefaultProxmoxMachine,
+			OSType:         DefaultProxmoxOSType,
+			EFIType:        DefaultProxmoxEFIType,
+			OutputType:     ProxmoxOutputTypeTemplate,
 		},
 	}
 }
@@ -118,6 +156,16 @@ func (c HardwareConfig) Normalize() HardwareConfig {
 	c.VCenter.Compatibility = strings.ToLower(strings.TrimSpace(c.VCenter.Compatibility))
 	c.VCenter.GuestOSID = strings.TrimSpace(c.VCenter.GuestOSID)
 	c.VCenter.OutputType = NormalizeVCenterOutputType(c.VCenter.OutputType)
+	c.Proxmox.Bridge = strings.TrimSpace(c.Proxmox.Bridge)
+	c.Proxmox.NetworkAdapter = strings.ToLower(strings.TrimSpace(c.Proxmox.NetworkAdapter))
+	c.Proxmox.SCSIController = strings.ToLower(strings.TrimSpace(c.Proxmox.SCSIController))
+	c.Proxmox.DiskInterface = strings.ToLower(strings.TrimSpace(c.Proxmox.DiskInterface))
+	c.Proxmox.DiskFormat = strings.ToLower(strings.TrimSpace(c.Proxmox.DiskFormat))
+	c.Proxmox.CPUType = strings.TrimSpace(c.Proxmox.CPUType)
+	c.Proxmox.Machine = strings.TrimSpace(c.Proxmox.Machine)
+	c.Proxmox.OSType = strings.TrimSpace(c.Proxmox.OSType)
+	c.Proxmox.EFIType = strings.ToLower(strings.TrimSpace(c.Proxmox.EFIType))
+	c.Proxmox.OutputType = NormalizeProxmoxOutputType(c.Proxmox.OutputType)
 	return c
 }
 
@@ -165,6 +213,33 @@ func (c HardwareConfig) Validate() error {
 	if !isOneOf(c.VCenter.OutputType, VCenterOutputTypeTemplate, VCenterOutputTypeVM) {
 		return errors.New("vcenter.output_type must be template or vm")
 	}
+	if !isOneOf(c.Proxmox.NetworkAdapter, "virtio", "e1000", "e1000e", "rtl8139", "vmxnet3") {
+		return errors.New("proxmox.network_adapter must be one of virtio, e1000, e1000e, rtl8139, vmxnet3")
+	}
+	if !isOneOf(c.Proxmox.SCSIController, "virtio-scsi-pci", "virtio-scsi-single", "lsi", "lsi53c810", "megasas", "pvscsi") {
+		return errors.New("proxmox.scsi_controller must be one of virtio-scsi-pci, virtio-scsi-single, lsi, lsi53c810, megasas, pvscsi")
+	}
+	if !isOneOf(c.Proxmox.DiskInterface, "scsi", "sata", "virtio", "ide") {
+		return errors.New("proxmox.disk_interface must be one of scsi, sata, virtio, ide")
+	}
+	if !isOneOf(c.Proxmox.DiskFormat, "raw", "qcow2", "vmdk") {
+		return errors.New("proxmox.disk_format must be one of raw, qcow2, vmdk")
+	}
+	if strings.TrimSpace(c.Proxmox.CPUType) == "" {
+		return errors.New("proxmox.cpu_type must not be empty")
+	}
+	if strings.TrimSpace(c.Proxmox.Machine) == "" {
+		return errors.New("proxmox.machine must not be empty")
+	}
+	if strings.TrimSpace(c.Proxmox.OSType) == "" {
+		return errors.New("proxmox.ostype must not be empty")
+	}
+	if !isOneOf(c.Proxmox.EFIType, "2m", "4m") {
+		return errors.New("proxmox.efi_type must be 2m or 4m")
+	}
+	if !isOneOf(c.Proxmox.OutputType, ProxmoxOutputTypeTemplate, ProxmoxOutputTypeVM) {
+		return errors.New("proxmox.output_type must be template or vm")
+	}
 	return nil
 }
 
@@ -188,6 +263,16 @@ func NormalizeVCenterOutputType(value string) string {
 	value = strings.Join(strings.Fields(value), "_")
 	if value == "" {
 		return VCenterOutputTypeTemplate
+	}
+	return value
+}
+
+func NormalizeProxmoxOutputType(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "-", "_")
+	value = strings.Join(strings.Fields(value), "_")
+	if value == "" {
+		return ProxmoxOutputTypeTemplate
 	}
 	return value
 }
