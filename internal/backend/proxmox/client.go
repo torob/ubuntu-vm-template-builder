@@ -18,8 +18,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-
-	"ubuntu-vm-template-builder/internal/qemulog"
 )
 
 const (
@@ -27,8 +25,9 @@ const (
 )
 
 var (
-	taskPollInterval    = 2 * time.Second
-	vmPowerPollInterval = 5 * time.Second
+	taskPollInterval      = 2 * time.Second
+	vmPowerPollInterval   = 5 * time.Second
+	consoleReconnectDelay = 2 * time.Second
 )
 
 type api interface {
@@ -388,9 +387,6 @@ func (c *Client) StreamSerialConsole(ctx context.Context, node string, vmid int,
 	}
 	defer conn.Close()
 
-	writer := qemulog.NewCompactingWriter(out)
-	defer writer.Flush()
-
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -407,14 +403,14 @@ func (c *Client) StreamSerialConsole(ctx context.Context, node string, vmid int,
 		}
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {
-			if ctx.Err() != nil || websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+			if ctx.Err() != nil {
 				return nil
 			}
 			return err
 		}
 		if messageType == websocket.TextMessage || messageType == websocket.BinaryMessage {
 			if !bytes.Equal(bytes.TrimSpace(data), []byte("OK")) {
-				if _, err := writer.Write(data); err != nil {
+				if _, err := out.Write(data); err != nil {
 					return err
 				}
 			}
@@ -427,7 +423,7 @@ func (c *Client) StreamSerialConsole(ctx context.Context, node string, vmid int,
 	for {
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {
-			if ctx.Err() != nil || websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+			if ctx.Err() != nil {
 				return nil
 			}
 			return err
@@ -435,10 +431,27 @@ func (c *Client) StreamSerialConsole(ctx context.Context, node string, vmid int,
 		if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
 			continue
 		}
-		if _, err := writer.Write(data); err != nil {
+		if _, err := out.Write(data); err != nil {
 			return err
 		}
 	}
+}
+
+func isTransientConsoleStreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		switch closeErr.Code {
+		case websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure:
+			return true
+		}
+	}
+	return strings.Contains(err.Error(), "unexpected EOF")
 }
 
 func (c *Client) consoleHandshake(ticket string) string {

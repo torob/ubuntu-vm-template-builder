@@ -19,6 +19,7 @@ import (
 
 	"ubuntu-vm-template-builder/internal/common"
 	"ubuntu-vm-template-builder/internal/offlineapt"
+	"ubuntu-vm-template-builder/internal/qemulog"
 	"ubuntu-vm-template-builder/internal/seediso"
 )
 
@@ -531,7 +532,7 @@ func powerOnAndWaitForInstaller(ctx context.Context, client api, node string, vm
 	go func() {
 		defer close(streamDone)
 		fmt.Printf("Streaming Proxmox installer serial console for VMID %d\n", vmid)
-		if err := client.StreamSerialConsole(streamCtx, node, vmid, out); err != nil && streamCtx.Err() == nil {
+		if err := streamSerialConsoleUntilStopped(streamCtx, client, node, vmid, out); err != nil && streamCtx.Err() == nil {
 			fmt.Printf("Warning: could not stream Proxmox serial console for VMID %d: %v\n", vmid, err)
 		}
 	}()
@@ -553,6 +554,36 @@ func powerOnAndWaitForInstaller(ctx context.Context, client api, node string, vm
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(vmPowerPollInterval):
+		}
+	}
+}
+
+func streamSerialConsoleUntilStopped(ctx context.Context, client api, node string, vmid int, out io.Writer) error {
+	if out == nil {
+		out = io.Discard
+	}
+	writer := qemulog.NewCompactingWriter(out)
+	defer writer.Flush()
+
+	for {
+		err := client.StreamSerialConsole(ctx, node, vmid, writer)
+		if err == nil || ctx.Err() != nil {
+			return nil
+		}
+		if !isTransientConsoleStreamError(err) {
+			return err
+		}
+		status, statusErr := client.CurrentVMStatus(ctx, node, vmid)
+		if statusErr != nil {
+			return fmt.Errorf("read VM power status after Proxmox serial console disconnect: %w", statusErr)
+		}
+		if status.Status == "stopped" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(consoleReconnectDelay):
 		}
 	}
 }

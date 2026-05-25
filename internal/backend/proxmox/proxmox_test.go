@@ -1,6 +1,7 @@
 package proxmox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	"ubuntu-vm-template-builder/internal/common"
 )
@@ -111,6 +114,80 @@ func TestConsoleHandshakeUsesAPITokenID(t *testing.T) {
 	}
 	if got := client.consoleHandshake(" "); got != "" {
 		t.Fatalf("empty ticket handshake = %q, want empty", got)
+	}
+}
+
+func TestTransientConsoleStreamErrorClassification(t *testing.T) {
+	transient := []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		io.EOF,
+		io.ErrUnexpectedEOF,
+		&websocket.CloseError{Code: websocket.CloseNormalClosure, Text: "normal"},
+		&websocket.CloseError{Code: websocket.CloseGoingAway, Text: "going away"},
+		&websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "unexpected EOF"},
+		errors.New("websocket: close 1006 (abnormal closure): unexpected EOF"),
+	}
+	for _, err := range transient {
+		if !isTransientConsoleStreamError(err) {
+			t.Fatalf("isTransientConsoleStreamError(%v) = false, want true", err)
+		}
+	}
+	if isTransientConsoleStreamError(errors.New("permission denied")) {
+		t.Fatal("permission denied was classified as transient")
+	}
+}
+
+func TestStreamSerialConsoleUntilStoppedReconnectsTransientClose(t *testing.T) {
+	restore := setFastPollIntervals()
+	defer restore()
+
+	fake := newFakeAPI()
+	fake.streamErrors = []error{io.ErrUnexpectedEOF, nil}
+	fake.streamOutputs = []string{"first", "second"}
+	fake.statuses = []string{"running"}
+
+	var out bytes.Buffer
+	if err := streamSerialConsoleUntilStopped(context.Background(), fake, "pve", 100, &out); err != nil {
+		t.Fatalf("streamSerialConsoleUntilStopped returned error: %v", err)
+	}
+	if got := countCalls(fake.calls, "stream-console"); got != 2 {
+		t.Fatalf("stream-console calls = %d, want 2; calls=%v", got, fake.calls)
+	}
+	if got := out.String(); !strings.Contains(got, "first\n") || !strings.Contains(got, "second\n") {
+		t.Fatalf("console output after reconnect = %q", got)
+	}
+}
+
+func TestStreamSerialConsoleUntilStoppedStopsAfterVMStops(t *testing.T) {
+	restore := setFastPollIntervals()
+	defer restore()
+
+	fake := newFakeAPI()
+	fake.streamErrors = []error{&websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "unexpected EOF"}}
+	fake.statuses = []string{"stopped"}
+
+	if err := streamSerialConsoleUntilStopped(context.Background(), fake, "pve", 100, io.Discard); err != nil {
+		t.Fatalf("streamSerialConsoleUntilStopped returned error after stopped VM: %v", err)
+	}
+	if got := countCalls(fake.calls, "stream-console"); got != 1 {
+		t.Fatalf("stream-console calls = %d, want 1; calls=%v", got, fake.calls)
+	}
+}
+
+func TestStreamSerialConsoleUntilStoppedReturnsNonTransientError(t *testing.T) {
+	restore := setFastPollIntervals()
+	defer restore()
+
+	fake := newFakeAPI()
+	fake.streamErrors = []error{errors.New("permission denied")}
+
+	err := streamSerialConsoleUntilStopped(context.Background(), fake, "pve", 100, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("streamSerialConsoleUntilStopped error = %v, want permission denied", err)
+	}
+	if got := countCalls(fake.calls, "stream-console"); got != 1 {
+		t.Fatalf("stream-console calls = %d, want 1; calls=%v", got, fake.calls)
 	}
 }
 
@@ -878,11 +955,14 @@ func intPtr(value int) *int {
 func setFastPollIntervals() func() {
 	oldTask := taskPollInterval
 	oldPower := vmPowerPollInterval
+	oldConsoleReconnect := consoleReconnectDelay
 	taskPollInterval = time.Millisecond
 	vmPowerPollInterval = time.Millisecond
+	consoleReconnectDelay = time.Millisecond
 	return func() {
 		taskPollInterval = oldTask
 		vmPowerPollInterval = oldPower
+		consoleReconnectDelay = oldConsoleReconnect
 	}
 }
 
@@ -897,6 +977,16 @@ func assertCallsContainInOrder(t *testing.T, calls, want []string) {
 	if idx != len(want) {
 		t.Fatalf("calls %v do not contain sequence %v", calls, want)
 	}
+}
+
+func countCalls(calls []string, want string) int {
+	count := 0
+	for _, call := range calls {
+		if call == want {
+			count++
+		}
+	}
+	return count
 }
 
 type countingReader struct {
@@ -927,6 +1017,8 @@ type fakeAPI struct {
 	taskErrors          map[string]error
 	stoppedVMs          []int
 	deletedVMs          []int
+	streamErrors        []error
+	streamOutputs       []string
 }
 
 func newFakeAPI() *fakeAPI {
@@ -1041,10 +1133,20 @@ func (f *fakeAPI) WaitTask(_ context.Context, _, upid string) error {
 
 func (f *fakeAPI) StreamSerialConsole(_ context.Context, _ string, _ int, out io.Writer) error {
 	f.calls = append(f.calls, "stream-console")
-	if out != nil {
-		_, _ = fmt.Fprintln(out, "console")
+	output := "console"
+	if len(f.streamOutputs) > 0 {
+		output = f.streamOutputs[0]
+		f.streamOutputs = f.streamOutputs[1:]
 	}
-	return nil
+	if out != nil {
+		_, _ = fmt.Fprintln(out, output)
+	}
+	if len(f.streamErrors) == 0 {
+		return nil
+	}
+	err := f.streamErrors[0]
+	f.streamErrors = f.streamErrors[1:]
+	return err
 }
 
 func cloneValues(values url.Values) url.Values {
