@@ -148,6 +148,12 @@ func TestUploadFileToStorageThroughHTTPClient(t *testing.T) {
 			if r.Method != http.MethodPost {
 				t.Fatalf("upload method = %s, want POST", r.Method)
 			}
+			if r.ContentLength <= int64(len("iso bytes")) {
+				t.Fatalf("upload ContentLength = %d, want multipart body length", r.ContentLength)
+			}
+			if len(r.TransferEncoding) != 0 {
+				t.Fatalf("upload used transfer encoding %v, want fixed content length", r.TransferEncoding)
+			}
 			reader, err := r.MultipartReader()
 			if err != nil {
 				t.Fatalf("MultipartReader: %v", err)
@@ -185,6 +191,27 @@ func TestUploadFileToStorageThroughHTTPClient(t *testing.T) {
 	if uploadedName != "uploaded.iso" || uploadedContent != "iso" {
 		t.Fatalf("multipart upload name/content = %q/%q", uploadedName, uploadedContent)
 	}
+}
+
+func TestStorageUploadBodyDoesNotReadSourceDuringConstruction(t *testing.T) {
+	source := &countingReader{}
+	body, contentType, contentLength, err := newStorageUploadBody(StorageUpload{
+		FileName: "uploaded.iso",
+		Content:  UploadContentISO,
+	}, source, 5*1024*1024*1024)
+	if err != nil {
+		t.Fatalf("newStorageUploadBody returned error: %v", err)
+	}
+	if source.reads != 0 {
+		t.Fatalf("source reads during body construction = %d, want 0", source.reads)
+	}
+	if !strings.HasPrefix(contentType, "multipart/form-data; boundary=") {
+		t.Fatalf("content type = %q, want multipart/form-data", contentType)
+	}
+	if contentLength <= 5*1024*1024*1024 {
+		t.Fatalf("content length = %d, want source size plus multipart framing", contentLength)
+	}
+	_ = body
 }
 
 func TestUploadTemporaryInstallerISORejectsExistingDestination(t *testing.T) {
@@ -870,6 +897,15 @@ func assertCallsContainInOrder(t *testing.T, calls, want []string) {
 	if idx != len(want) {
 		t.Fatalf("calls %v do not contain sequence %v", calls, want)
 	}
+}
+
+type countingReader struct {
+	reads int
+}
+
+func (r *countingReader) Read([]byte) (int, error) {
+	r.reads++
+	return 0, io.EOF
 }
 
 type fakeAPI struct {

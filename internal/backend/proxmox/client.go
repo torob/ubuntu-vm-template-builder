@@ -200,24 +200,20 @@ func (c *Client) UploadFile(ctx context.Context, node, storage string, upload St
 	}
 	defer source.Close()
 
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	if err := writer.WriteField("content", upload.Content); err != nil {
-		return "", err
-	}
-	part, err := writer.CreateFormFile("filename", upload.FileName)
+	info, err := source.Stat()
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(part, source); err != nil {
-		return "", err
-	}
-	if err := writer.Close(); err != nil {
-		return "", err
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("upload source %q is not a regular file", upload.SourcePath)
 	}
 
+	body, contentType, contentLength, err := newStorageUploadBody(upload, source, info.Size())
+	if err != nil {
+		return "", err
+	}
 	var raw json.RawMessage
-	if err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/storage/%s/upload", url.PathEscape(node), url.PathEscape(storage)), nil, writer.FormDataContentType(), &body, &raw); err != nil {
+	if err := c.doJSONWithContentLength(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/storage/%s/upload", url.PathEscape(node), url.PathEscape(storage)), nil, contentType, body, contentLength, &raw); err != nil {
 		return "", err
 	}
 	expectedVolumeID := buildVolumeID(storage, upload.Content, upload.FileName)
@@ -250,6 +246,33 @@ func (c *Client) UploadFile(ctx context.Context, node, storage string, upload St
 		}
 	}
 	return expectedVolumeID, nil
+}
+
+func newStorageUploadBody(upload StorageUpload, source io.Reader, sourceSize int64) (io.Reader, string, int64, error) {
+	if sourceSize < 0 {
+		return nil, "", 0, fmt.Errorf("upload source size must not be negative")
+	}
+
+	var header bytes.Buffer
+	writer := multipart.NewWriter(&header)
+	if err := writer.WriteField("content", upload.Content); err != nil {
+		return nil, "", 0, err
+	}
+	if _, err := writer.CreateFormFile("filename", upload.FileName); err != nil {
+		return nil, "", 0, err
+	}
+
+	var footer bytes.Buffer
+	footerWriter := multipart.NewWriter(&footer)
+	if err := footerWriter.SetBoundary(writer.Boundary()); err != nil {
+		return nil, "", 0, err
+	}
+	if err := footerWriter.Close(); err != nil {
+		return nil, "", 0, err
+	}
+
+	contentLength := int64(header.Len()) + sourceSize + int64(footer.Len())
+	return io.MultiReader(&header, source, &footer), writer.FormDataContentType(), contentLength, nil
 }
 
 func (c *Client) DeleteVolume(ctx context.Context, node, storage, volumeID string) (string, error) {
@@ -454,6 +477,10 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, query url.Values,
 }
 
 func (c *Client) doJSON(ctx context.Context, method, endpoint string, query url.Values, contentType string, body io.Reader, out any) error {
+	return c.doJSONWithContentLength(ctx, method, endpoint, query, contentType, body, -1, out)
+}
+
+func (c *Client) doJSONWithContentLength(ctx context.Context, method, endpoint string, query url.Values, contentType string, body io.Reader, contentLength int64, out any) error {
 	u := c.apiURL(endpoint)
 	if query != nil {
 		u.RawQuery = query.Encode()
@@ -464,6 +491,9 @@ func (c *Client) doJSON(ctx context.Context, method, endpoint string, query url.
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
+	}
+	if contentLength >= 0 {
+		req.ContentLength = contentLength
 	}
 	c.addAuth(req.Header)
 
