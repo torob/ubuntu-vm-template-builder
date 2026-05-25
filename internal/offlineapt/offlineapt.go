@@ -3,6 +3,10 @@ package offlineapt
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/sha512"
 	"errors"
 	"fmt"
 	"io"
@@ -27,8 +31,10 @@ const (
 	targetSourceList       = "/etc/apt/sources.list.d/ubuntu-vm-template-builder-offline.list"
 	targetSourceParts      = "/tmp/ubuntu-vm-template-builder-empty-sources.d"
 	ubuntuArchiveKeyring   = "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
-	indexTargetFormat      = "$(FILENAME)|$(SITE)|$(RELEASE)|$(COMPONENT)|$(ARCHITECTURE)|$(CREATED_BY)|$(TARGET_OF)|$(METAKEY)"
 	aptArchitecture        = "amd64"
+	aptAllArchitecture     = "all"
+	offlineSuite           = "offline"
+	offlineComponent       = "main"
 	repositoryWorkDirName  = "offline-apt-repo"
 	aptWorkDirName         = "offline-apt-work"
 	downloadWorkDirName    = "offline-apt-downloads"
@@ -77,15 +83,10 @@ type packageURI struct {
 	RelativePath string
 }
 
-type indexTarget struct {
-	Filename     string
-	Site         string
-	Release      string
-	Component    string
+type packageIndexRecord struct {
+	RelativePath string
 	Architecture string
-	CreatedBy    string
-	TargetOf     string
-	MetaKey      string
+	Text         string
 }
 
 func (ExecRunner) Output(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
@@ -251,7 +252,11 @@ func buildRepositoryWithCodename(ctx context.Context, cfg Config, codename, work
 	}
 
 	aptOptions := isolatedAPTOptions(aptRoot, downloadDir)
-	if _, err := runner.Output(ctx, "", "apt-get", append(aptOptions, "update")...); err != nil {
+	updateOutput, err := runner.Output(ctx, "", "apt-get", append(aptOptions, "update")...)
+	if err != nil {
+		return Repository{}, err
+	}
+	if err := checkAPTUpdateOutput(updateOutput); err != nil {
 		return Repository{}, err
 	}
 
@@ -279,26 +284,14 @@ func buildRepositoryWithCodename(ctx context.Context, cfg Config, codename, work
 		return Repository{}, err
 	}
 
-	targetOutput, err := runner.Output(ctx, "", "apt-get", append(aptOptions, "indextargets", "--format", indexTargetFormat)...)
-	if err != nil {
-		return Repository{}, err
-	}
-	targets, err := parseIndexTargets(targetOutput)
-	if err != nil {
-		return Repository{}, err
-	}
-	sources, err := copyPackageIndexes(repoDir, targets, cfg.APTURL, suites, cfg.Components)
-	if err != nil {
-		return Repository{}, err
-	}
-	if err := copyInReleaseFiles(aptRoot, repoDir, suitesFromSources(sources)); err != nil {
+	if err := writeTrimmedRepositoryMetadata(aptRoot, repoDir, packageURIs); err != nil {
 		return Repository{}, err
 	}
 
 	repo := Repository{
 		Path:         repoDir,
 		Packages:     append([]string(nil), cfg.Packages...),
-		Sources:      copySources(sources),
+		Sources:      offlineRepositorySources(),
 		PackageFiles: packageRelativePaths(packageURIs),
 	}
 	if err := ValidateRepository(repo); err != nil {
@@ -473,7 +466,7 @@ func installSourceLines(install InstallConfig) []string {
 	var lines []string
 	for _, source := range install.Sources {
 		components := strings.Join(source.Components, " ")
-		lines = append(lines, fmt.Sprintf("deb [signed-by=%s check-date=no] file:%s %s %s", ubuntuArchiveKeyring, guestRepoPath, source.Suite, components))
+		lines = append(lines, fmt.Sprintf("deb [trusted=yes check-date=no] file:%s %s %s", guestRepoPath, source.Suite, components))
 	}
 	return lines
 }
@@ -481,9 +474,10 @@ func installSourceLines(install InstallConfig) []string {
 func installRequiredIndexPaths(install InstallConfig) []string {
 	var paths []string
 	for _, source := range install.Sources {
-		paths = append(paths, fmt.Sprintf("dists/%s/InRelease", source.Suite))
+		paths = append(paths, fmt.Sprintf("dists/%s/Release", source.Suite))
 		for _, component := range source.Components {
 			paths = append(paths, fmt.Sprintf("dists/%s/%s/binary-%s/Packages", source.Suite, component, aptArchitecture))
+			paths = append(paths, fmt.Sprintf("dists/%s/%s/binary-%s/Packages", source.Suite, component, aptAllArchitecture))
 		}
 	}
 	return paths
@@ -502,11 +496,14 @@ func ValidateRepository(repo Repository) error {
 		return errors.New("offline APT repository has no package index sources")
 	}
 	for _, source := range repo.Sources {
-		if err := requireFile(filepath.Join(repo.Path, "dists", source.Suite, "InRelease")); err != nil {
+		if err := requireFile(filepath.Join(repo.Path, "dists", source.Suite, "Release")); err != nil {
 			return err
 		}
 		for _, component := range source.Components {
 			if err := requireFile(filepath.Join(repo.Path, "dists", source.Suite, component, "binary-"+aptArchitecture, "Packages")); err != nil {
+				return err
+			}
+			if err := requireFile(filepath.Join(repo.Path, "dists", source.Suite, component, "binary-"+aptAllArchitecture, "Packages")); err != nil {
 				return err
 			}
 		}
@@ -538,9 +535,10 @@ func ValidateEmbeddedRepository(isoPath string, repo Repository) error {
 
 	var paths []string
 	for _, source := range repo.Sources {
-		paths = append(paths, isoRepoPath("dists/"+source.Suite+"/InRelease"))
+		paths = append(paths, isoRepoPath("dists/"+source.Suite+"/Release"))
 		for _, component := range source.Components {
 			paths = append(paths, isoRepoPath(fmt.Sprintf("dists/%s/%s/binary-%s/Packages", source.Suite, component, aptArchitecture)))
+			paths = append(paths, isoRepoPath(fmt.Sprintf("dists/%s/%s/binary-%s/Packages", source.Suite, component, aptAllArchitecture)))
 		}
 	}
 	for _, rel := range repo.PackageFiles {
@@ -619,31 +617,6 @@ func packageURIPath(rawURI string) (string, error) {
 	return rel, nil
 }
 
-func parseIndexTargets(data []byte) ([]indexTarget, error) {
-	var out []indexTarget
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Split(line, "|")
-		if len(fields) != 8 {
-			return nil, fmt.Errorf("parse apt index target line %q: expected 8 fields", line)
-		}
-		out = append(out, indexTarget{
-			Filename:     fields[0],
-			Site:         strings.TrimRight(fields[1], "/"),
-			Release:      fields[2],
-			Component:    fields[3],
-			Architecture: fields[4],
-			CreatedBy:    fields[5],
-			TargetOf:     fields[6],
-			MetaKey:      fields[7],
-		})
-	}
-	return out, nil
-}
-
 func copySelectedPackages(downloadDir, repoDir string, packages []packageURI) error {
 	for _, pkg := range packages {
 		source := filepath.Join(downloadDir, filepath.Base(pkg.DownloadName))
@@ -662,81 +635,198 @@ func copySelectedPackages(downloadDir, repoDir string, packages []packageURI) er
 	return nil
 }
 
-func copyPackageIndexes(repoDir string, targets []indexTarget, aptURL string, suites, components []string) ([]RepositorySource, error) {
-	wantSuites := setFrom(suites)
-	wantComponents := setFrom(components)
-	copied := map[string]map[string]bool{}
-	normalizedURL := strings.TrimRight(aptURL, "/")
-
-	for _, target := range targets {
-		if target.Site != normalizedURL ||
-			target.CreatedBy != "Packages" ||
-			target.TargetOf != "deb" ||
-			target.Architecture != aptArchitecture ||
-			!wantSuites[target.Release] ||
-			!wantComponents[target.Component] {
-			continue
-		}
-		if target.MetaKey == "" {
-			return nil, fmt.Errorf("APT index target for %s/%s has empty metakey", target.Release, target.Component)
-		}
-		destination := filepath.Join(repoDir, "dists", target.Release, filepath.FromSlash(target.MetaKey))
-		if err := copyFile(target.Filename, destination, 0o644); err != nil {
-			return nil, err
-		}
-		if copied[target.Release] == nil {
-			copied[target.Release] = map[string]bool{}
-		}
-		copied[target.Release][target.Component] = true
+func writeTrimmedRepositoryMetadata(aptRoot, repoDir string, packages []packageURI) error {
+	records, err := selectedPackageIndexRecords(aptRoot, packages)
+	if err != nil {
+		return err
 	}
 
-	sources := make([]RepositorySource, 0, len(suites))
-	for _, suite := range suites {
-		var copiedComponents []string
-		for _, component := range components {
-			if copied[suite][component] {
-				copiedComponents = append(copiedComponents, component)
+	recordsByArch := map[string][]packageIndexRecord{
+		aptArchitecture:    nil,
+		aptAllArchitecture: nil,
+	}
+	for _, record := range records {
+		switch record.Architecture {
+		case aptArchitecture, aptAllArchitecture:
+			recordsByArch[record.Architecture] = append(recordsByArch[record.Architecture], record)
+		default:
+			return fmt.Errorf("downloaded package %s has unsupported architecture %q", record.RelativePath, record.Architecture)
+		}
+	}
+
+	for _, arch := range []string{aptArchitecture, aptAllArchitecture} {
+		path := filepath.Join(repoDir, "dists", offlineSuite, offlineComponent, "binary-"+arch, "Packages")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("create parent directory for %s: %w", path, err)
+		}
+		var out strings.Builder
+		for _, record := range recordsByArch[arch] {
+			text := strings.TrimRight(record.Text, "\r\n")
+			if text == "" {
 				continue
 			}
-			fmt.Printf("Warning: mirror did not provide binary-%s Packages index for %s/%s from %s; skipping that source component\n", aptArchitecture, suite, component, normalizedURL)
+			out.WriteString(text)
+			out.WriteString("\n\n")
 		}
-		if len(copiedComponents) > 0 {
-			sources = append(sources, RepositorySource{
-				Suite:      suite,
-				Components: copiedComponents,
-			})
+		if err := os.WriteFile(path, []byte(out.String()), 0o644); err != nil {
+			return fmt.Errorf("write trimmed package index %s: %w", path, err)
 		}
 	}
-	if len(sources) == 0 {
-		return nil, fmt.Errorf("APT did not download any binary-%s Packages indexes from %s for requested suites/components", aptArchitecture, normalizedURL)
-	}
-	return sources, nil
+
+	return writeReleaseFile(repoDir)
 }
 
-func copyInReleaseFiles(aptRoot, repoDir string, suites []string) error {
+func selectedPackageIndexRecords(aptRoot string, packages []packageURI) ([]packageIndexRecord, error) {
+	want := map[string]bool{}
+	for _, pkg := range packages {
+		want[pkg.RelativePath] = true
+	}
+	if len(want) == 0 {
+		return nil, errors.New("no downloaded package paths to index")
+	}
+
 	listDir := filepath.Join(aptRoot, "var/lib/apt/lists")
 	entries, err := os.ReadDir(listDir)
 	if err != nil {
-		return fmt.Errorf("read APT list directory %q: %w", listDir, err)
+		return nil, fmt.Errorf("read APT list directory %q: %w", listDir, err)
 	}
 
-	for _, suite := range suites {
-		suffix := "_dists_" + suite + "_InRelease"
-		var source string
-		for _, entry := range entries {
-			if entry.IsDir() {
+	found := map[string]packageIndexRecord{}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.Contains(entry.Name(), "_Packages") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(listDir, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("read APT package index %s: %w", entry.Name(), err)
+		}
+		for _, paragraph := range packageIndexParagraphs(string(data)) {
+			filename := normalizePackageFilename(packageIndexField(paragraph, "Filename"))
+			if !want[filename] || found[filename].Text != "" {
 				continue
 			}
-			if strings.HasSuffix(entry.Name(), suffix) {
-				source = filepath.Join(listDir, entry.Name())
-				break
+			architecture := strings.TrimSpace(packageIndexField(paragraph, "Architecture"))
+			if architecture == "" {
+				return nil, fmt.Errorf("package index record for %s has no Architecture field", filename)
+			}
+			found[filename] = packageIndexRecord{
+				RelativePath: filename,
+				Architecture: architecture,
+				Text:         paragraph,
 			}
 		}
-		if source == "" {
-			return fmt.Errorf("signed InRelease metadata for suite %q was not downloaded", suite)
+	}
+
+	paths := packageRelativePaths(packages)
+	records := make([]packageIndexRecord, 0, len(paths))
+	for _, rel := range paths {
+		record := found[rel]
+		if record.Text == "" {
+			return nil, fmt.Errorf("downloaded package %s was not found in authenticated APT package indexes", rel)
 		}
-		if err := copyFile(source, filepath.Join(repoDir, "dists", suite, "InRelease"), 0o644); err != nil {
-			return err
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+func packageIndexParagraphs(data string) []string {
+	data = strings.ReplaceAll(data, "\r\n", "\n")
+	parts := strings.Split(data, "\n\n")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.Trim(part, "\n")
+		if strings.TrimSpace(part) != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func packageIndexField(paragraph, name string) string {
+	prefix := strings.ToLower(name) + ":"
+	for _, line := range strings.Split(paragraph, "\n") {
+		if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok || strings.ToLower(strings.TrimSpace(key))+":" != prefix {
+			continue
+		}
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+func normalizePackageFilename(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "./")
+	value = filepath.ToSlash(filepath.Clean(value))
+	if value == "." {
+		return ""
+	}
+	return value
+}
+
+func writeReleaseFile(repoDir string) error {
+	type releaseIndex struct {
+		path string
+		data []byte
+	}
+	var indexes []releaseIndex
+	for _, arch := range []string{aptArchitecture, aptAllArchitecture} {
+		rel := fmt.Sprintf("%s/binary-%s/Packages", offlineComponent, arch)
+		path := filepath.Join(repoDir, "dists", offlineSuite, filepath.FromSlash(rel))
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read trimmed package index %s: %w", path, err)
+		}
+		indexes = append(indexes, releaseIndex{path: rel, data: data})
+	}
+
+	var out strings.Builder
+	out.WriteString("Origin: ubuntu-vm-template-builder\n")
+	out.WriteString("Label: ubuntu-vm-template-builder offline packages\n")
+	out.WriteString("Suite: " + offlineSuite + "\n")
+	out.WriteString("Codename: " + offlineSuite + "\n")
+	out.WriteString("Architectures: " + aptArchitecture + " " + aptAllArchitecture + "\n")
+	out.WriteString("Components: " + offlineComponent + "\n")
+	out.WriteString("Date: Mon, 25 May 2026 00:00:00 +0000\n")
+	for _, section := range []struct {
+		name string
+		sum  func([]byte) string
+	}{
+		{name: "MD5Sum", sum: func(data []byte) string { return fmt.Sprintf("%x", md5.Sum(data)) }},
+		{name: "SHA1", sum: func(data []byte) string { return fmt.Sprintf("%x", sha1.Sum(data)) }},
+		{name: "SHA256", sum: func(data []byte) string { return fmt.Sprintf("%x", sha256.Sum256(data)) }},
+		{name: "SHA512", sum: func(data []byte) string { return fmt.Sprintf("%x", sha512.Sum512(data)) }},
+	} {
+		out.WriteString(section.name + ":\n")
+		for _, index := range indexes {
+			out.WriteString(fmt.Sprintf(" %s %d %s\n", section.sum(index.data), len(index.data), index.path))
+		}
+	}
+
+	path := filepath.Join(repoDir, "dists", offlineSuite, "Release")
+	if err := os.WriteFile(path, []byte(out.String()), 0o644); err != nil {
+		return fmt.Errorf("write offline APT Release file: %w", err)
+	}
+	return nil
+}
+
+func checkAPTUpdateOutput(data []byte) error {
+	text := string(data)
+	for _, marker := range []string{
+		"Failed to fetch",
+		"Some index files failed to download",
+		"NO_PUBKEY",
+		"EXPKEYSIG",
+		"BADSIG",
+		"The following signatures couldn't be verified",
+		"is not signed",
+		"GPG error",
+	} {
+		if strings.Contains(text, marker) {
+			return fmt.Errorf("apt-get update did not fully authenticate/download requested indexes: %s", strings.TrimSpace(text))
 		}
 	}
 	return nil
@@ -751,6 +841,10 @@ func packageRelativePaths(packages []packageURI) []string {
 	return out
 }
 
+func offlineRepositorySources() []RepositorySource {
+	return []RepositorySource{{Suite: offlineSuite, Components: []string{offlineComponent}}}
+}
+
 func copySources(sources []RepositorySource) []RepositorySource {
 	out := make([]RepositorySource, 0, len(sources))
 	for _, source := range sources {
@@ -758,19 +852,6 @@ func copySources(sources []RepositorySource) []RepositorySource {
 			Suite:      source.Suite,
 			Components: append([]string(nil), source.Components...),
 		})
-	}
-	return out
-}
-
-func suitesFromSources(sources []RepositorySource) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, source := range sources {
-		if seen[source.Suite] {
-			continue
-		}
-		seen[source.Suite] = true
-		out = append(out, source.Suite)
 	}
 	return out
 }
@@ -813,6 +894,7 @@ func prepareAPTDirectories(downloadDir, aptRoot string) error {
 		filepath.Join(downloadDir, "partial"),
 		filepath.Join(aptRoot, "etc/apt/sources.list.d"),
 		filepath.Join(aptRoot, "etc/apt/trusted.gpg.d"),
+		filepath.Join(aptRoot, "etc/apt/preferences.d"),
 		filepath.Join(aptRoot, "var/cache/apt/archives/partial"),
 		filepath.Join(aptRoot, "var/lib/apt/lists/partial"),
 		filepath.Join(aptRoot, "var/lib/dpkg"),
@@ -885,14 +967,6 @@ func requireFile(path string) error {
 		return fmt.Errorf("required offline APT repository file %q is a directory", path)
 	}
 	return nil
-}
-
-func setFrom(values []string) map[string]bool {
-	out := make(map[string]bool, len(values))
-	for _, value := range values {
-		out[value] = true
-	}
-	return out
 }
 
 func isoRepoPath(rel string) string {

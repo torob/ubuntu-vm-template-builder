@@ -402,9 +402,9 @@ builder applies Proxmox's required API encoding.
 `--install-extra-packages` is optional for `qemu build`, `vcenter build`, and
 `proxmox build`. When set, the builder asks APT for the exact requested package
 closure, downloads those `.deb` files on the host with Ubuntu signature and hash
-verification enabled, embeds only those `.deb` files plus Ubuntu's signed
-`dists/...` metadata in the remastered installer ISO, and adds late-commands
-that run an injected builder script to install from
+verification enabled, embeds only those `.deb` files plus a trimmed ISO-local
+APT index in the remastered installer ISO, and adds late-commands that run an
+injected builder script to install from
 `/cdrom/ubuntu-vm-template-builder/offline-apt`. Temporary APT files copied
 into the target guest are removed before the installer finishes.
 
@@ -437,9 +437,8 @@ uses `autoinstall.packages`, the Ubuntu installer will continue to handle those
 packages normally. The extra packages listed in `--install-extra-packages` are
 installed later from the ISO-local repository, so they can work without guest
 internet access as long as all needed dependencies were downloaded by the host.
-Inside the guest, APT verifies the embedded repository against Ubuntu's public
-archive key using the copied `InRelease` metadata; the package indexes are not
-trimmed because that would break Ubuntu's signed hashes.
+The target guest uses the trimmed ISO-local index, while the host build step
+rejects repository signature or key failures before any package is embedded.
 
 Example:
 

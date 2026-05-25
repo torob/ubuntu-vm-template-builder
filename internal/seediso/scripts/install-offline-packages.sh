@@ -11,12 +11,10 @@ target=${target%/}
 guest_repo_path=/var/lib/ubuntu-vm-template-builder/offline-apt
 source_list_path=/etc/apt/sources.list.d/ubuntu-vm-template-builder-offline.list
 source_parts_path=/tmp/ubuntu-vm-template-builder-empty-sources.d
-ubuntu_archive_keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg
 
 repo_dst="$target$guest_repo_path"
 source_list="$target$source_list_path"
 source_parts="$target$source_parts_path"
-keyring="$target$ubuntu_archive_keyring"
 
 cleanup() {
   rm -f "$source_list"
@@ -35,10 +33,6 @@ run_in_target() {
   fi
 }
 
-[ -r "$keyring" ] || {
-  echo "missing Ubuntu archive keyring: $keyring" >&2
-  exit 1
-}
 [ -d "$repo_src" ] || {
   echo "missing embedded offline APT repo: $repo_src" >&2
   ls -la /cdrom 2>/dev/null || true

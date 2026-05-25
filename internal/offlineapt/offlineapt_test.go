@@ -109,13 +109,10 @@ autoinstall:
 	}
 }
 
-func TestInstallLateCommandsUseUbuntuSignedRepoSubset(t *testing.T) {
+func TestInstallLateCommandsUseSelfContainedOfflineRepo(t *testing.T) {
 	install := InstallConfig{
 		Packages: []string{"git", "curl"},
-		Sources: []RepositorySource{
-			{Suite: "noble", Components: []string{"main", "universe"}},
-			{Suite: "noble-security", Components: []string{"main", "universe"}},
-		},
+		Sources:  offlineRepositorySources(),
 	}
 	commands := InstallLateCommands(install)
 	if len(commands) != 1 {
@@ -149,21 +146,17 @@ func TestInstallLateCommandsUseUbuntuSignedRepoSubset(t *testing.T) {
 		t.Fatalf("packages config = %q", packages)
 	}
 	for _, want := range []string{
-		"signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg check-date=no",
-		"file:/var/lib/ubuntu-vm-template-builder/offline-apt noble main universe",
-		"file:/var/lib/ubuntu-vm-template-builder/offline-apt noble-security main universe",
+		"trusted=yes check-date=no",
+		"file:/var/lib/ubuntu-vm-template-builder/offline-apt offline main",
 	} {
 		if !strings.Contains(sources, want) {
 			t.Fatalf("offline sources config missing %q in:\n%s", want, sources)
 		}
 	}
 	for _, want := range []string{
-		"dists/noble/InRelease",
-		"dists/noble/main/binary-amd64/Packages",
-		"dists/noble/universe/binary-amd64/Packages",
-		"dists/noble-security/InRelease",
-		"dists/noble-security/main/binary-amd64/Packages",
-		"dists/noble-security/universe/binary-amd64/Packages",
+		"dists/offline/Release",
+		"dists/offline/main/binary-amd64/Packages",
+		"dists/offline/main/binary-all/Packages",
 	} {
 		if !strings.Contains(requiredIndexes, want) {
 			t.Fatalf("offline required-indexes config missing %q in:\n%s", want, requiredIndexes)
@@ -171,7 +164,7 @@ func TestInstallLateCommandsUseUbuntuSignedRepoSubset(t *testing.T) {
 	}
 }
 
-func TestInstallLateCommandsUseEffectiveComponentsPerSuite(t *testing.T) {
+func TestInstallConfigUsesEffectiveSources(t *testing.T) {
 	install := InstallConfig{
 		Packages: []string{"git"},
 		Sources: []RepositorySource{
@@ -195,8 +188,11 @@ func TestInstallLateCommandsUseEffectiveComponentsPerSuite(t *testing.T) {
 	}
 	for _, want := range []string{
 		"dists/noble/main/binary-amd64/Packages",
+		"dists/noble/main/binary-all/Packages",
 		"dists/noble/universe/binary-amd64/Packages",
+		"dists/noble/universe/binary-all/Packages",
 		"dists/noble-updates/main/binary-amd64/Packages",
+		"dists/noble-updates/main/binary-all/Packages",
 	} {
 		if !strings.Contains(requiredIndexes, want) {
 			t.Fatalf("offline required-indexes config missing %q in:\n%s", want, requiredIndexes)
@@ -207,7 +203,7 @@ func TestInstallLateCommandsUseEffectiveComponentsPerSuite(t *testing.T) {
 	}
 }
 
-func TestBuildRepositoryWithRunnerCreatesUbuntuSignedSubset(t *testing.T) {
+func TestBuildRepositoryWithRunnerCreatesSelfContainedTrimmedRepo(t *testing.T) {
 	runner := &fakeRunner{t: t}
 	workDir := t.TempDir()
 	cfg := Config{
@@ -227,19 +223,8 @@ func TestBuildRepositoryWithRunnerCreatesUbuntuSignedSubset(t *testing.T) {
 	if strings.Join(repo.Packages, ",") != "git,curl" {
 		t.Fatalf("repo packages = %#v", repo.Packages)
 	}
-	assertSources(t, repo.Sources, []RepositorySource{
-		{Suite: "noble", Components: []string{"main"}},
-		{Suite: "noble-updates", Components: []string{"main"}},
-	})
-	assertSources(t, repo.InstallConfig().Sources, []RepositorySource{
-		{Suite: "noble", Components: []string{"main"}},
-		{Suite: "noble-updates", Components: []string{"main"}},
-	})
-	for _, source := range repo.Sources {
-		if containsArg(source.Components, "multiverse") {
-			t.Fatalf("repo sources should not include missing multiverse index: %#v", repo.Sources)
-		}
-	}
+	assertSources(t, repo.Sources, offlineRepositorySources())
+	assertSources(t, repo.InstallConfig().Sources, offlineRepositorySources())
 
 	sources, err := os.ReadFile(filepath.Join(workDir, aptWorkDirName, "etc/apt/sources.list"))
 	if err != nil {
@@ -258,15 +243,28 @@ func TestBuildRepositoryWithRunnerCreatesUbuntuSignedSubset(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"dists/noble/InRelease",
-		"dists/noble-updates/InRelease",
-		"dists/noble/main/binary-amd64/Packages",
-		"dists/noble-updates/main/binary-amd64/Packages",
+		"dists/offline/Release",
+		"dists/offline/main/binary-amd64/Packages",
+		"dists/offline/main/binary-all/Packages",
 		"pool/main/g/git/git_1_amd64.deb",
-		"pool/main/c/curl/curl_1_amd64.deb",
+		"pool/main/c/curl/curl_1_all.deb",
 	} {
 		if _, err := os.Stat(filepath.Join(repo.Path, filepath.FromSlash(want))); err != nil {
 			t.Fatalf("repo missing %s: %v", want, err)
+		}
+	}
+	amd64Packages := readTestFile(t, filepath.Join(repo.Path, "dists/offline/main/binary-amd64/Packages"))
+	allPackages := readTestFile(t, filepath.Join(repo.Path, "dists/offline/main/binary-all/Packages"))
+	release := readTestFile(t, filepath.Join(repo.Path, "dists/offline/Release"))
+	if !strings.Contains(amd64Packages, "Package: git") || strings.Contains(amd64Packages, "Package: curl") || strings.Contains(amd64Packages, "Package: vim") {
+		t.Fatalf("amd64 Packages should contain only selected amd64 package:\n%s", amd64Packages)
+	}
+	if !strings.Contains(allPackages, "Package: curl") || strings.Contains(allPackages, "Package: git") || strings.Contains(allPackages, "Package: vim") {
+		t.Fatalf("all Packages should contain only selected Architecture: all package:\n%s", allPackages)
+	}
+	for _, want := range []string{"MD5Sum:", "SHA1:", "SHA256:", "SHA512:", "main/binary-amd64/Packages", "main/binary-all/Packages"} {
+		if !strings.Contains(release, want) {
+			t.Fatalf("Release file missing %q in:\n%s", want, release)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(repo.Path, "Packages")); !os.IsNotExist(err) {
@@ -285,18 +283,30 @@ func TestBuildRepositoryWithRunnerCreatesUbuntuSignedSubset(t *testing.T) {
 	if !runner.sawCommand("apt-get", "--download-only") {
 		t.Fatalf("runner did not see apt-get --download-only: %#v", runner.commands)
 	}
-	if !runner.sawCommand("apt-get", "indextargets") {
-		t.Fatalf("runner did not see apt-get indextargets: %#v", runner.commands)
-	}
 	if runner.sawCommand("dpkg-scanpackages", ".") {
 		t.Fatalf("runner unexpectedly saw dpkg-scanpackages: %#v", runner.commands)
 	}
 }
 
-func TestCopyPackageIndexesFailsWhenNoPackagesTargetsWereCopied(t *testing.T) {
-	_, err := copyPackageIndexes(t.TempDir(), nil, "http://mirror.example/ubuntu", []string{"noble"}, []string{"main"})
-	if err == nil || !strings.Contains(err.Error(), "did not download any binary-amd64 Packages indexes") {
-		t.Fatalf("copyPackageIndexes error = %v, want no package indexes error", err)
+func TestBuildRepositoryRejectsUnauthenticatedPackagesBeforeISOEmbedding(t *testing.T) {
+	runner := &fakeRunner{
+		t:            t,
+		updateOutput: "W: GPG error: http://mirror.example/ubuntu noble InRelease: The following signatures couldn't be verified because the public key is not available: NO_PUBKEY 0123456789ABCDEF\n",
+	}
+	workDir := t.TempDir()
+
+	_, err := buildRepositoryWithCodename(context.Background(), Config{
+		APTURL:   "http://mirror.example/ubuntu",
+		Packages: []string{"git"},
+	}, "noble", workDir, runner)
+	if err == nil || !strings.Contains(err.Error(), "authenticate") {
+		t.Fatalf("buildRepositoryWithCodename error = %v, want authentication failure", err)
+	}
+	if runner.sawCommand("apt-get", "--print-uris") || runner.sawCommand("apt-get", "--download-only") {
+		t.Fatalf("unauthenticated package indexes should not be used for ISO repo contents: %#v", runner.commands)
+	}
+	if _, statErr := os.Stat(filepath.Join(workDir, repositoryWorkDirName)); !os.IsNotExist(statErr) {
+		t.Fatalf("unauthenticated packages should not produce a repo for remastered ISO embedding, stat err = %v", statErr)
 	}
 }
 
@@ -316,12 +326,13 @@ func TestParsePackageURIsKeepsOriginalPoolPaths(t *testing.T) {
 
 func TestValidateRepositoryRejectsMissingSelectedDeb(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "dists/noble/InRelease"), "signed\n")
-	writeFile(t, filepath.Join(dir, "dists/noble/main/binary-amd64/Packages"), "Package: git\n")
+	writeFile(t, filepath.Join(dir, "dists/offline/Release"), "Suite: offline\n")
+	writeFile(t, filepath.Join(dir, "dists/offline/main/binary-amd64/Packages"), "Package: git\n")
+	writeFile(t, filepath.Join(dir, "dists/offline/main/binary-all/Packages"), "")
 
 	err := ValidateRepository(Repository{
 		Path:         dir,
-		Sources:      []RepositorySource{{Suite: "noble", Components: []string{"main"}}},
+		Sources:      offlineRepositorySources(),
 		PackageFiles: []string{"pool/main/g/git/git_1_amd64.deb"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "git_1_amd64.deb") {
@@ -330,8 +341,9 @@ func TestValidateRepositoryRejectsMissingSelectedDeb(t *testing.T) {
 }
 
 type fakeRunner struct {
-	t        *testing.T
-	commands []recordedCommand
+	t            *testing.T
+	updateOutput string
+	commands     []recordedCommand
 }
 
 type recordedCommand struct {
@@ -355,23 +367,20 @@ func (r *fakeRunner) Output(ctx context.Context, dir, name string, args ...strin
 	switch {
 	case containsArg(args, "update"):
 		r.writeAPTLists(aptRoot)
+		if r.updateOutput != "" {
+			return []byte(r.updateOutput), nil
+		}
 		return []byte("ok\n"), nil
 	case containsArg(args, "--print-uris"):
 		return []byte(strings.Join([]string{
 			"'http://mirror.example/ubuntu/pool/main/g/git/git_1_amd64.deb' git_1_amd64.deb 1 MD5Sum:abc",
-			"'http://mirror.example/ubuntu/pool/main/c/curl/curl_1_amd64.deb' curl_1_amd64.deb 1 MD5Sum:def",
+			"'http://mirror.example/ubuntu/pool/main/c/curl/curl_1_all.deb' curl_1_all.deb 1 MD5Sum:def",
 			"",
 		}, "\n")), nil
 	case containsArg(args, "--download-only"):
 		writeFile(r.t, filepath.Join(downloadDir, "git_1_amd64.deb"), "git deb")
-		writeFile(r.t, filepath.Join(downloadDir, "curl_1_amd64.deb"), "curl deb")
+		writeFile(r.t, filepath.Join(downloadDir, "curl_1_all.deb"), "curl deb")
 		return []byte("downloaded\n"), nil
-	case containsArg(args, "indextargets"):
-		return []byte(strings.Join([]string{
-			filepath.Join(aptRoot, "var/lib/apt/lists/mirror_dists_noble_main_binary-amd64_Packages") + "|http://mirror.example/ubuntu|noble|main|amd64|Packages|deb|main/binary-amd64/Packages",
-			filepath.Join(aptRoot, "var/lib/apt/lists/mirror_dists_noble-updates_main_binary-amd64_Packages") + "|http://mirror.example/ubuntu|noble-updates|main|amd64|Packages|deb|main/binary-amd64/Packages",
-			"",
-		}, "\n")), nil
 	default:
 		return []byte("ok\n"), nil
 	}
@@ -380,8 +389,22 @@ func (r *fakeRunner) Output(ctx context.Context, dir, name string, args ...strin
 func (r *fakeRunner) writeAPTLists(aptRoot string) {
 	writePlainFile(filepath.Join(aptRoot, "var/lib/apt/lists/mirror_dists_noble_InRelease"), "signed noble\n")
 	writePlainFile(filepath.Join(aptRoot, "var/lib/apt/lists/mirror_dists_noble-updates_InRelease"), "signed noble-updates\n")
-	writePlainFile(filepath.Join(aptRoot, "var/lib/apt/lists/mirror_dists_noble_main_binary-amd64_Packages"), "Package: git\nFilename: pool/main/g/git/git_1_amd64.deb\n")
-	writePlainFile(filepath.Join(aptRoot, "var/lib/apt/lists/mirror_dists_noble-updates_main_binary-amd64_Packages"), "Package: curl\nFilename: pool/main/c/curl/curl_1_amd64.deb\n")
+	writePlainFile(filepath.Join(aptRoot, "var/lib/apt/lists/mirror_dists_noble_main_binary-amd64_Packages"), strings.Join([]string{
+		"Package: git",
+		"Architecture: amd64",
+		"Filename: pool/main/g/git/git_1_amd64.deb",
+		"",
+		"Package: vim",
+		"Architecture: amd64",
+		"Filename: pool/main/v/vim/vim_1_amd64.deb",
+		"",
+	}, "\n"))
+	writePlainFile(filepath.Join(aptRoot, "var/lib/apt/lists/mirror_dists_noble-updates_main_binary-amd64_Packages"), strings.Join([]string{
+		"Package: curl",
+		"Architecture: all",
+		"Filename: pool/main/c/curl/curl_1_all.deb",
+		"",
+	}, "\n"))
 }
 
 func (r *fakeRunner) sawCommand(name, arg string) bool {
