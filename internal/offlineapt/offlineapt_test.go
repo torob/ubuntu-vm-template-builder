@@ -274,8 +274,8 @@ func TestBuildRepositoryWithRunnerCreatesSelfContainedTrimmedRepo(t *testing.T) 
 	if !runner.sawCommand("apt-get", "update") {
 		t.Fatalf("runner did not see apt-get update: %#v", runner.commands)
 	}
-	if !runner.sawCommandWithArgs("apt-get", "update", dep11IndexTargetOption, cnfIndexTargetOption) {
-		t.Fatalf("runner apt-get update did not disable optional index targets: %#v", runner.commands)
+	if !runner.sawCommandWithArgs("apt-get", "update", gzipIndexesOption, dep11IndexTargetOption, cnfIndexTargetOption) {
+		t.Fatalf("runner apt-get update did not request plain package indexes and disable optional index targets: %#v", runner.commands)
 	}
 	if !runner.sawCommand("apt-get", "--print-uris") {
 		t.Fatalf("runner did not see apt-get --print-uris: %#v", runner.commands)

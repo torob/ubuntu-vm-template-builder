@@ -38,6 +38,7 @@ const (
 	repositoryWorkDirName  = "offline-apt-repo"
 	aptWorkDirName         = "offline-apt-work"
 	downloadWorkDirName    = "offline-apt-downloads"
+	gzipIndexesOption      = "Acquire::GzipIndexes=false"
 	dep11IndexTargetOption = "Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false"
 	cnfIndexTargetOption   = "Acquire::IndexTargets::deb::CNF::DefaultEnabled=false"
 )
@@ -953,6 +954,7 @@ func isolatedAPTOptions(aptRoot, downloadDir string) []string {
 		"-o", "APT::Architecture=" + aptArchitecture,
 		"-o", "Debug::NoLocking=true",
 		"-o", "Acquire::Languages=none",
+		"-o", gzipIndexesOption,
 		"-o", dep11IndexTargetOption,
 		"-o", cnfIndexTargetOption,
 	}
