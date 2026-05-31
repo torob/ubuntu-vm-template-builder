@@ -151,6 +151,7 @@ func TestHardwareConfigExampleCommands(t *testing.T) {
 				"scsi_controller: virtio-scsi-pci",
 				"disk_interface: scsi",
 				"disk_format: raw",
+				"disk_io_thread: false",
 				"cpu_type: host",
 				"machine: q35",
 				"ostype: l26",

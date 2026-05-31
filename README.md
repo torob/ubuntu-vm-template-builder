@@ -187,6 +187,7 @@ proxmox:
   scsi_controller: virtio-scsi-pci
   disk_interface: scsi
   disk_format: raw
+  disk_io_thread: false
   cpu_type: host
   machine: q35
   ostype: l26
@@ -294,6 +295,7 @@ Proxmox hardware config options:
 | `proxmox.scsi_controller` | No | `virtio-scsi-pci` | SCSI controller. Supported values are `virtio-scsi-pci`, `virtio-scsi-single`, `lsi`, `lsi53c810`, `megasas`, and `pvscsi`. |
 | `proxmox.disk_interface` | No | `scsi` | Guest disk bus. Supported values are `scsi`, `sata`, `virtio`, and `ide`. |
 | `proxmox.disk_format` | No | `raw` | Disk format requested from Proxmox. Supported values are `raw`, `qcow2`, and `vmdk`; storage capabilities still apply. |
+| `proxmox.disk_io_thread` | No | `false` | Enables Proxmox `iothread=1` for the main VM disk. Requires `disk_interface: virtio`, or `disk_interface: scsi` with `scsi_controller: virtio-scsi-single`. |
 | `proxmox.cpu_type` | No | `host` | CPU type passed to Proxmox, such as `host` or `x86-64-v3`. |
 | `proxmox.machine` | No | `q35` | Proxmox machine type. |
 | `proxmox.ostype` | No | `l26` | Proxmox guest OS type. |

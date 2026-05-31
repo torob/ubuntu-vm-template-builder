@@ -244,7 +244,7 @@ func TestLoadHardwareConfigDefaults(t *testing.T) {
 	if cfg.VCenter.SCSIController != "pvscsi" || cfg.VCenter.NetworkAdapter != "vmxnet3" || cfg.VCenter.Network != "" || cfg.VCenter.DiskProvisioning != VCenterDiskProvisioningThickLazyZeroed || cfg.VCenter.Compatibility != "" || cfg.VCenter.GuestOSID != DefaultVCenterGuestOSID || cfg.VCenter.ReserveAllGuestMemory || cfg.VCenter.OutputType != VCenterOutputTypeTemplate {
 		t.Fatalf("default vcenter hardware config = %+v", cfg.VCenter)
 	}
-	if cfg.Proxmox.Bridge != "" || cfg.Proxmox.NetworkAdapter != DefaultProxmoxNetworkAdapter || cfg.Proxmox.SCSIController != DefaultProxmoxSCSIController || cfg.Proxmox.DiskInterface != DefaultProxmoxDiskInterface || cfg.Proxmox.DiskFormat != DefaultProxmoxDiskFormat || cfg.Proxmox.CPUType != DefaultProxmoxCPUType || cfg.Proxmox.Machine != DefaultProxmoxMachine || cfg.Proxmox.OSType != DefaultProxmoxOSType || cfg.Proxmox.EFIType != DefaultProxmoxEFIType || cfg.Proxmox.PreEnrolledKeys || cfg.Proxmox.OutputType != ProxmoxOutputTypeTemplate {
+	if cfg.Proxmox.Bridge != "" || cfg.Proxmox.NetworkAdapter != DefaultProxmoxNetworkAdapter || cfg.Proxmox.SCSIController != DefaultProxmoxSCSIController || cfg.Proxmox.DiskInterface != DefaultProxmoxDiskInterface || cfg.Proxmox.DiskFormat != DefaultProxmoxDiskFormat || cfg.Proxmox.DiskIOThread || cfg.Proxmox.CPUType != DefaultProxmoxCPUType || cfg.Proxmox.Machine != DefaultProxmoxMachine || cfg.Proxmox.OSType != DefaultProxmoxOSType || cfg.Proxmox.EFIType != DefaultProxmoxEFIType || cfg.Proxmox.PreEnrolledKeys || cfg.Proxmox.OutputType != ProxmoxOutputTypeTemplate {
 		t.Fatalf("default proxmox hardware config = %+v", cfg.Proxmox)
 	}
 }
@@ -274,8 +274,9 @@ proxmox:
   bridge: " vmbr1 "
   network_adapter: E1000E
   scsi_controller: VIRTIO-SCSI-SINGLE
-  disk_interface: VIRTIO
+  disk_interface: SCSI
   disk_format: QCOW2
+  disk_io_thread: true
   cpu_type: " x86-64-v3 "
   machine: " q35 "
   ostype: " l26 "
@@ -300,7 +301,7 @@ proxmox:
 	if cfg.VCenter.SCSIController != "lsilogic-sas" || cfg.VCenter.NetworkAdapter != "e1000e" || cfg.VCenter.Network != "VM Network" || cfg.VCenter.DiskProvisioning != VCenterDiskProvisioningThickEagerZeroed || cfg.VCenter.Compatibility != "vmx-21" || cfg.VCenter.GuestOSID != "otherLinux64Guest" || !cfg.VCenter.ReserveAllGuestMemory || cfg.VCenter.OutputType != VCenterOutputTypeVM {
 		t.Fatalf("custom vcenter hardware config = %+v", cfg.VCenter)
 	}
-	if cfg.Proxmox.Bridge != "vmbr1" || cfg.Proxmox.NetworkAdapter != "e1000e" || cfg.Proxmox.SCSIController != "virtio-scsi-single" || cfg.Proxmox.DiskInterface != "virtio" || cfg.Proxmox.DiskFormat != "qcow2" || cfg.Proxmox.CPUType != "x86-64-v3" || cfg.Proxmox.Machine != "q35" || cfg.Proxmox.OSType != "l26" || cfg.Proxmox.EFIType != "2m" || !cfg.Proxmox.PreEnrolledKeys || cfg.Proxmox.OutputType != ProxmoxOutputTypeVM {
+	if cfg.Proxmox.Bridge != "vmbr1" || cfg.Proxmox.NetworkAdapter != "e1000e" || cfg.Proxmox.SCSIController != "virtio-scsi-single" || cfg.Proxmox.DiskInterface != "scsi" || cfg.Proxmox.DiskFormat != "qcow2" || !cfg.Proxmox.DiskIOThread || cfg.Proxmox.CPUType != "x86-64-v3" || cfg.Proxmox.Machine != "q35" || cfg.Proxmox.OSType != "l26" || cfg.Proxmox.EFIType != "2m" || !cfg.Proxmox.PreEnrolledKeys || cfg.Proxmox.OutputType != ProxmoxOutputTypeVM {
 		t.Fatalf("custom proxmox hardware config = %+v", cfg.Proxmox)
 	}
 }
@@ -347,7 +348,7 @@ func TestLoadHardwareConfigPartialKeepsDefaults(t *testing.T) {
 	if cfg.VCenter.SCSIController != "pvscsi" || cfg.VCenter.NetworkAdapter != "vmxnet3" || cfg.VCenter.Network != "" || cfg.VCenter.DiskProvisioning != VCenterDiskProvisioningThickLazyZeroed || cfg.VCenter.Compatibility != "" || cfg.VCenter.GuestOSID != DefaultVCenterGuestOSID || cfg.VCenter.ReserveAllGuestMemory || cfg.VCenter.OutputType != VCenterOutputTypeTemplate {
 		t.Fatalf("partial config did not keep vcenter defaults: %+v", cfg.VCenter)
 	}
-	if cfg.Proxmox.Bridge != "" || cfg.Proxmox.NetworkAdapter != DefaultProxmoxNetworkAdapter || cfg.Proxmox.SCSIController != DefaultProxmoxSCSIController || cfg.Proxmox.DiskInterface != DefaultProxmoxDiskInterface || cfg.Proxmox.DiskFormat != DefaultProxmoxDiskFormat || cfg.Proxmox.CPUType != DefaultProxmoxCPUType || cfg.Proxmox.Machine != DefaultProxmoxMachine || cfg.Proxmox.OSType != DefaultProxmoxOSType || cfg.Proxmox.EFIType != DefaultProxmoxEFIType || cfg.Proxmox.PreEnrolledKeys || cfg.Proxmox.OutputType != ProxmoxOutputTypeTemplate {
+	if cfg.Proxmox.Bridge != "" || cfg.Proxmox.NetworkAdapter != DefaultProxmoxNetworkAdapter || cfg.Proxmox.SCSIController != DefaultProxmoxSCSIController || cfg.Proxmox.DiskInterface != DefaultProxmoxDiskInterface || cfg.Proxmox.DiskFormat != DefaultProxmoxDiskFormat || cfg.Proxmox.DiskIOThread || cfg.Proxmox.CPUType != DefaultProxmoxCPUType || cfg.Proxmox.Machine != DefaultProxmoxMachine || cfg.Proxmox.OSType != DefaultProxmoxOSType || cfg.Proxmox.EFIType != DefaultProxmoxEFIType || cfg.Proxmox.PreEnrolledKeys || cfg.Proxmox.OutputType != ProxmoxOutputTypeTemplate {
 		t.Fatalf("partial config did not keep proxmox defaults: %+v", cfg.Proxmox)
 	}
 }
@@ -441,6 +442,26 @@ func TestHardwareConfigValidationRejectsInvalidValues(t *testing.T) {
 	cfg.Proxmox.DiskFormat = "vdi"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate returned nil error for invalid Proxmox disk format")
+	}
+
+	cfg = validHardwareConfig()
+	cfg.Proxmox.DiskIOThread = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate returned nil error for incompatible Proxmox disk_io_thread default scsi controller")
+	}
+
+	cfg = validHardwareConfig()
+	cfg.Proxmox.DiskInterface = "virtio"
+	cfg.Proxmox.DiskIOThread = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error for virtio Proxmox disk_io_thread: %v", err)
+	}
+
+	cfg = validHardwareConfig()
+	cfg.Proxmox.SCSIController = "virtio-scsi-single"
+	cfg.Proxmox.DiskIOThread = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error for scsi virtio-scsi-single Proxmox disk_io_thread: %v", err)
 	}
 
 	cfg = validHardwareConfig()

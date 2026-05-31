@@ -315,7 +315,9 @@ func TestBuildCreateVMValuesUsesRequestedHardware(t *testing.T) {
 	cfg.Hardware.MemoryMB = 8192
 	cfg.Hardware.Proxmox.Bridge = "vmbr1"
 	cfg.Hardware.Proxmox.NetworkAdapter = "e1000e"
+	cfg.Hardware.Proxmox.SCSIController = "virtio-scsi-single"
 	cfg.Hardware.Proxmox.DiskFormat = "qcow2"
+	cfg.Hardware.Proxmox.DiskIOThread = true
 	cfg.Hardware.Proxmox.CPUType = "x86-64-v3"
 	cfg.Hardware.Proxmox.PreEnrolledKeys = true
 	cfg.Proxmox.Bridge = "vmbr1"
@@ -332,10 +334,10 @@ func TestBuildCreateVMValuesUsesRequestedHardware(t *testing.T) {
 		"ostype":   "l26",
 		"machine":  "q35",
 		"cpu":      "x86-64-v3",
-		"scsihw":   "virtio-scsi-pci",
+		"scsihw":   "virtio-scsi-single",
 		"net0":     "e1000e,bridge=vmbr1",
 		"ide2":     "local:iso/installer.iso,media=cdrom",
-		"scsi0":    "vms:20,format=qcow2",
+		"scsi0":    "vms:20,format=qcow2,iothread=1",
 		"boot":     "order=ide2;scsi0",
 		"serial0":  "socket",
 		"vga":      "serial0",

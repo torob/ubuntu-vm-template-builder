@@ -891,6 +891,8 @@ func printProxmoxHardwareConfigExample(out io.Writer) {
 	fmt.Fprintln(out, "  disk_interface: scsi")
 	fmt.Fprintln(out, "  # disk_format: raw, qcow2, or vmdk")
 	fmt.Fprintln(out, "  disk_format: raw")
+	fmt.Fprintln(out, "  # disk_io_thread enables Proxmox iothread=1 for the main disk; requires virtio disk_interface or scsi with virtio-scsi-single")
+	fmt.Fprintln(out, "  disk_io_thread: false")
 	fmt.Fprintln(out, "  # cpu_type is passed to Proxmox as the VM CPU type")
 	fmt.Fprintln(out, "  cpu_type: host")
 	fmt.Fprintln(out, "  # machine is the Proxmox machine type")

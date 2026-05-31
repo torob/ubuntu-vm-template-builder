@@ -464,7 +464,7 @@ func BuildCreateVMValues(cfg Config, vmid int, installerVolumeID string) (url.Va
 	values.Set("onboot", "0")
 	values.Set("net0", fmt.Sprintf("%s,bridge=%s", hardware.Proxmox.NetworkAdapter, connection.Bridge))
 	values.Set("ide2", fmt.Sprintf("%s,media=cdrom", installerVolumeID))
-	values.Set(diskKey, fmt.Sprintf("%s:%d,format=%s", connection.DiskStorage, diskAllocationGiB, hardware.Proxmox.DiskFormat))
+	values.Set(diskKey, proxmoxDiskSpec(connection.DiskStorage, diskAllocationGiB, hardware.Proxmox))
 	values.Set("boot", fmt.Sprintf("order=ide2;%s", diskKey))
 	values.Set("serial0", "socket")
 	values.Set("vga", "serial0")
@@ -475,6 +475,17 @@ func BuildCreateVMValues(cfg Config, vmid int, installerVolumeID string) (url.Va
 		values.Set("bios", "seabios")
 	}
 	return values, nil
+}
+
+func proxmoxDiskSpec(storage string, allocationGiB int64, hardware common.ProxmoxHardwareConfig) string {
+	parts := []string{
+		fmt.Sprintf("%s:%d", storage, allocationGiB),
+		"format=" + hardware.DiskFormat,
+	}
+	if hardware.DiskIOThread {
+		parts = append(parts, "iothread=1")
+	}
+	return strings.Join(parts, ",")
 }
 
 func BuildFinalizeVMValues(cfg Config) (url.Values, error) {

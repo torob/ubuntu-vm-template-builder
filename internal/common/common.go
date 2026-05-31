@@ -78,6 +78,7 @@ type ProxmoxHardwareConfig struct {
 	SCSIController  string `yaml:"scsi_controller"`
 	DiskInterface   string `yaml:"disk_interface"`
 	DiskFormat      string `yaml:"disk_format"`
+	DiskIOThread    bool   `yaml:"disk_io_thread"`
 	CPUType         string `yaml:"cpu_type"`
 	Machine         string `yaml:"machine"`
 	OSType          string `yaml:"ostype"`
@@ -221,6 +222,9 @@ func (c HardwareConfig) Validate() error {
 	}
 	if !isOneOf(c.Proxmox.DiskInterface, "scsi", "sata", "virtio", "ide") {
 		return errors.New("proxmox.disk_interface must be one of scsi, sata, virtio, ide")
+	}
+	if c.Proxmox.DiskIOThread && c.Proxmox.DiskInterface != "virtio" && !(c.Proxmox.DiskInterface == "scsi" && c.Proxmox.SCSIController == "virtio-scsi-single") {
+		return errors.New("proxmox.disk_io_thread requires proxmox.disk_interface virtio or proxmox.disk_interface scsi with proxmox.scsi_controller virtio-scsi-single")
 	}
 	if !isOneOf(c.Proxmox.DiskFormat, "raw", "qcow2", "vmdk") {
 		return errors.New("proxmox.disk_format must be one of raw, qcow2, vmdk")
